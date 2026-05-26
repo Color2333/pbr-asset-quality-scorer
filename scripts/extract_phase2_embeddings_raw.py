@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PACKAGE_ROOT))
 
 from quality_scorer.constants import ALL_CHANNELS
-from quality_scorer.convnext_backbone import ConvNeXtOrdinalScorer
+from quality_scorer.models import ConvNeXtOrdinalScorer
 from quality_scorer.ordinal import logits_to_class_probs
 from quality_scorer.transforms import get_transforms
 from screening.labels import load_csv

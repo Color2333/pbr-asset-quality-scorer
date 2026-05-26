@@ -12,8 +12,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "asset_quality_scorer"))
 
 from quality_scorer.constants import ALL_CHANNELS
-from quality_scorer.convnext_regression import ConvNeXtRegressionScorer
-from quality_scorer.data_v2 import CHANNEL_DEFECT_COLS, TensorCacheCLIPDataset, build_score_lookup
+from quality_scorer.models import ConvNeXtRegressionScorer
+from quality_scorer.data import CHANNEL_DEFECT_COLS, TensorCacheCLIPDataset, build_score_lookup
 
 try:
     from PIL import Image

@@ -18,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PACKAGE_ROOT))
 
 from quality_scorer.constants import ALL_CHANNELS
-from quality_scorer.convnext_backbone import ConvNeXtOrdinalScorer
+from quality_scorer.models import ConvNeXtOrdinalScorer
 from quality_scorer.data import PBRScoreDataset, build_score_lookup
 from quality_scorer.metrics import compute_pos_weight, eval_ordinal_epoch
 from quality_scorer.ordinal import CoralEntropyLoss
