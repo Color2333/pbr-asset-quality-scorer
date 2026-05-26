@@ -1,0 +1,36 @@
+{
+  "channel": "metallic",
+  "arch": "convnext_base_regression_clip",
+  "epoch": [
+    1,
+    2
+  ],
+  "train_loss": [
+    0.6902,
+    0.5755
+  ],
+  "val_mae": [
+    1.1171,
+    1.017
+  ],
+  "val_srcc": [
+    0.7128,
+    0.741
+  ],
+  "val_plcc": [
+    0.7094,
+    0.7421
+  ],
+  "val_within_1": [
+    0.7346,
+    0.7777
+  ],
+  "val_binary_f1": [
+    0.361,
+    0.5678
+  ],
+  "val_binary_best_f1": [
+    0.7222,
+    0.7483
+  ]
+}

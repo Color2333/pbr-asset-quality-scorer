@@ -1,0 +1,28 @@
+{
+  "channel": "roughness",
+  "arch": "convnext_base_regression_clip",
+  "epoch": [
+    1
+  ],
+  "train_loss": [
+    0.3895
+  ],
+  "val_mae": [
+    0.6685
+  ],
+  "val_srcc": [
+    0.7715
+  ],
+  "val_plcc": [
+    0.7588
+  ],
+  "val_within_1": [
+    0.9037
+  ],
+  "val_binary_f1": [
+    0.3128
+  ],
+  "val_binary_best_f1": [
+    0.6861
+  ]
+}

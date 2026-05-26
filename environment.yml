@@ -1,0 +1,27 @@
+name: asset-quality-scorer
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - pillow
+  - tqdm
+  - pyyaml
+  - tensorboard
+  - pip:
+      - opencv-python-headless
+      - rich
+      - trimesh
+      - umap-learn

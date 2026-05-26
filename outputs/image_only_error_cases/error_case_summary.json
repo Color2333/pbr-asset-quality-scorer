@@ -1,0 +1,10 @@
+{
+  "valid_assets": 37447,
+  "top_k": 200,
+  "max_abs_final_error": 2.261337000310435,
+  "mean_top_k_abs_final_error": 1.4202268789972488,
+  "outputs": {
+    "csv": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/image_only_error_cases/top_final_score_errors.csv",
+    "contact_sheet": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/image_only_error_cases/top_final_score_errors_contact_sheet.jpg"
+  }
+}

@@ -1,0 +1,25 @@
+# Model checkpoints (300-350 MB each)
+*.pt
+*.pth
+
+# Large embedding/data files
+*.npz
+*.pkl
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Process / server files
+*.pid
+nohup.out
+http_server_*.log
+outputs/nohup.out
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

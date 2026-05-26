@@ -1,0 +1,28 @@
+inputs:
+  checkpoint_root: asset_quality_scorer/outputs/phase1_ordinal
+  image_root: screening/data_v2
+  labels_root: screening/data_38k
+
+embedding:
+  channels:
+    - normal_map
+    - roughness
+    - metallic
+    - base_color
+  normalize: true
+  include_geometry_features: true
+
+visualization:
+  methods:
+    - tsne
+    - umap
+  color_by:
+    - tier
+    - final_score
+    - normal_score
+    - roughness_score
+    - metallic_score
+    - base_color_score
+
+output:
+  root: asset_quality_scorer/outputs/phase2_embedding

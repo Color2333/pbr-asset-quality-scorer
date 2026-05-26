@@ -1,0 +1,32 @@
+data:
+  image_root: screening/data_v2
+  labels_root: screening/data_38k
+  lmdb_path: screening/channel_store_38k.lmdb
+  channels:
+    - normal_map
+    - roughness
+    - metallic
+    - base_color
+
+model:
+  backbone: base
+  num_classes: 6
+  invalid_max_score: 1
+
+train:
+  epochs: 30
+  batch_size: 128
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  patience: 7
+  entropy_lambda: 0.15
+  label_smoothing: 0.05
+  mid_oversample_factor: 4.0
+
+output:
+  root: asset_quality_scorer/outputs/phase1_ordinal
+  save_best_by:
+    - ordinal_mae
+    - within_1
+    - binary_f1

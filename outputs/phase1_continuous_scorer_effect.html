@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>连续质量打分器效果说明</title>
+<style>
+:root { --bg:#f6f7fb; --card:#ffffff; --ink:#172033; --muted:#647084; --line:#dfe4ee; --blue:#2563eb; --green:#15803d; --amber:#b45309; --red:#b91c1c; }
+* { box-sizing:border-box; } body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,"Noto Sans SC",sans-serif; background:var(--bg); color:var(--ink); line-height:1.6; }
+.container { max-width:1180px; margin:0 auto; padding:32px 20px 56px; } .hero { background:linear-gradient(135deg,#10233f,#2563eb); color:white; border-radius:24px; padding:32px; box-shadow:0 18px 50px rgba(22,35,60,.18); }
+.hero h1 { margin:0 0 12px; font-size:34px; letter-spacing:-.03em; } .hero p { margin:0; max-width:900px; color:#dbeafe; font-size:17px; }
+.cards { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:18px 0 24px; } .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:18px; }
+.card .k { color:var(--muted); font-size:13px; } .card .v { font-size:28px; font-weight:800; margin-top:4px; } .card .s { color:var(--muted); font-size:13px; }
+section.block { background:var(--card); border:1px solid var(--line); border-radius:22px; padding:24px; margin-top:18px; } h2 { margin:0 0 12px; font-size:23px; } h3 { margin:0 0 6px; font-size:19px; } .lead { color:var(--muted); margin-top:0; }
+table { width:100%; border-collapse:collapse; font-size:14px; } th,td { border-bottom:1px solid var(--line); padding:10px 9px; text-align:left; vertical-align:top; } th { background:#f8fafc; color:#475569; font-weight:700; }
+.explain { display:grid; grid-template-columns:1.1fr .9fr; gap:18px; } .note-box { background:#f8fafc; border:1px solid var(--line); border-radius:16px; padding:16px; } .note-box ul { margin:8px 0 0; padding-left:20px; }
+.case-card { background:var(--card); border:1px solid var(--line); border-radius:22px; padding:22px; margin-top:18px; } .case-head { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; } .case-head p { margin:0; color:var(--muted); }
+.case-score { min-width:150px; background:#f8fafc; border:1px solid var(--line); border-radius:16px; padding:12px; text-align:center; } .case-score div { color:var(--muted); font-size:12px; } .case-score strong { display:block; font-size:30px; line-height:1.1; } .case-score span { color:var(--muted); font-size:12px; }
+.model-name { margin:12px 0; color:#334155; font-size:13px; word-break:break-all; background:#f8fafc; border-radius:10px; padding:8px 10px; } .case-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:12px 0 16px; }
+figure { margin:0; background:#0f172a; border-radius:14px; overflow:hidden; border:1px solid var(--line); } figure img { width:100%; display:block; aspect-ratio:1/1; object-fit:cover; background:#111827; } figcaption { color:white; font-size:12px; padding:7px 9px; background:rgba(15,23,42,.94); } .no-img { grid-column:1/-1; padding:22px; border:1px dashed var(--line); border-radius:14px; color:var(--muted); text-align:center; }
+.summary-list { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-top:12px; } .summary-list div { background:#f8fafc; border:1px solid var(--line); border-radius:14px; padding:14px; }
+@media (max-width:900px) { .cards,.case-grid,.summary-list,.explain { grid-template-columns:1fr; } .case-head { flex-direction:column; } .case-score { width:100%; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="hero"><h1>连续质量打分器效果说明</h1><p>这个报告只看第一步 Phase 1：四个 PBR 通道的连续质量 scorer。它的任务不是直接替代人工总分，而是把 normal、roughness、metallic、base color 各自打成 0-5 的连续质量分，作为后续 asset-level 判断的基础信号。</p></div>
+  <div class="cards"><div class="card"><div class="k">最可靠通道</div><div class="v">normal + roughness</div><div class="s">趋势稳定，和人工质量最一致</div></div><div class="card"><div class="k">连续分误差</div><div class="v">约 0.62-0.69</div><div class="s">主力通道平均差不到 1 分</div></div><div class="card"><div class="k">全量资产</div><div class="v">37,996</div><div class="s">已跑 image-only 分析</div></div><div class="card"><div class="k">主要风险</div><div class="v">校准</div><div class="s">metallic / base_color 容易偏极端或边界弱</div></div></div>
+  <section class="block explain"><div><h2>一句话结论</h2><p class="lead">第一步是可用的：它已经能把 PBR 图片通道转成有意义的连续质量分。最适合的用法是作为后续 fusion scorer 或 asset-level 评分的输入，而不是单独拿某一个通道做最终判定。</p><div class="summary-list"><div><strong>能做什么</strong><br>区分通道质量高低，尤其是 normal_map 和 roughness。</div><div><strong>不能做什么</strong><br>不能完整理解资产是否真的可用、风格是否合适、语义是否正确。</div><div><strong>看哪个指标</strong><br>优先看 expected_mae、相关性、分数分布和错误案例。</div><div><strong>下一步</strong><br>做分数校准，并把四通道分和 embedding 一起用于资产总分。</div></div></div><div class="note-box"><h3>怎么理解 expected score？</h3><p>模型不是只猜一个整数分，而是预测 0-5 每个档位的概率，再算出一个连续期望分。例如它可能认为某张 roughness 图像“更像 2.7 分”。</p><ul><li><strong>expected_mae = 0.6</strong>：平均离人工分差 0.6 分，比较可用。</li><li><strong>相关性高</strong>：说明模型排序能力好，高质量通常会给高分。</li><li><strong>二分类 F1</strong>：只用于兼容旧 valid/invalid gate，不是这一步最核心指标。</li></ul></div></section>
+  <section class="block"><h2>各通道效果</h2><p class="lead">这里把训练验证集指标和全量 image-only 分析放在一起看。数值越低的 MAE 越好，相关性越高越好。</p><table><thead><tr><th>通道</th><th>训练 Expected MAE</th><th>全量 MAE</th><th>全量相关性</th><th>Within-1</th><th>Best Binary F1</th><th>通俗判断</th></tr></thead><tbody><tr><td><strong>Normal Map</strong></td><td>0.639</td><td>0.568</td><td>0.831</td><td>0.571</td><td>0.867</td><td>最稳定，和 tier / final score 趋势一致。</td></tr><tr><td><strong>Roughness</strong></td><td>0.690</td><td>0.603</td><td>0.871</td><td>0.458</td><td>0.799</td><td>相关性最高，是当前最强通道信号。</td></tr><tr><td><strong>Metallic</strong></td><td>0.684</td><td>1.100</td><td>0.630</td><td>0.688</td><td>0.812</td><td>可用，但容易走 0/5 极端。</td></tr><tr><td><strong>Base Color</strong></td><td>0.619</td><td>0.621</td><td>0.621</td><td>0.228</td><td>0.336</td><td>连续分有趋势，硬分类边界弱。</td></tr></tbody></table></section>
+  <section class="block"><h2>怎么读案例</h2><p class="lead">每个案例下面有“人工分”和“模型连续分”。两者越接近越好；但更重要的是趋势是否合理，比如好资产给高分、差资产给低分。</p></section>
+  
+<section class="case-card">
+  <div class="case-head"><div><h3>高质量资产：四个通道都给出偏高分</h3><p>理想情况。人工 final score 高，通道标签也高，模型的 expected score 基本跟着高走。</p></div><div class="case-score"><div>Final Score</div><strong>4.34</strong><span>Tier 2 (高级/AAA)</span></div></div>
+  <div class="model-name">sketchfab__51__51298078e67c4c68acbdbd6b2a7c0770_2</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/train/valid/sketchfab__51__51298078e67c4c68acbdbd6b2a7c0770_2.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/valid/sketchfab__51__51298078e67c4c68acbdbd6b2a7c0770_2.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/metallic/test/valid/sketchfab__51__51298078e67c4c68acbdbd6b2a7c0770_2.png" alt="metallic"><figcaption>Metallic</figcaption></figure><figure><img src="../../screening/data_v2/base_color/train/valid/sketchfab__51__51298078e67c4c68acbdbd6b2a7c0770_2.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>5</td><td>5.00</td><td>-0.00</td></tr><tr><td>Roughness</td><td>4</td><td>4.11</td><td>+0.11</td></tr><tr><td>Metallic</td><td>5</td><td>4.99</td><td>-0.01</td></tr><tr><td>Base Color</td><td>4</td><td>4.22</td><td>+0.22</td></tr></tbody></table>
+</section>
+
+<section class="case-card">
+  <div class="case-head"><div><h3>低质量资产：normal / roughness 能明显压低</h3><p>模型最可靠的两个信号是 normal_map 和 roughness。低质量样本里，它们通常会给低分。</p></div><div class="case-score"><div>Final Score</div><strong>1.00</strong><span>Tier 5 (勉强可用)</span></div></div>
+  <div class="model-name">sketchfab__de__def4335c6f9b48c2a15db650781aa3b2_None</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/train/invalid/sketchfab__de__def4335c6f9b48c2a15db650781aa3b2_None.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/invalid/sketchfab__de__def4335c6f9b48c2a15db650781aa3b2_None.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/metallic/val/invalid/sketchfab__de__def4335c6f9b48c2a15db650781aa3b2_None.png" alt="metallic"><figcaption>Metallic</figcaption></figure><figure><img src="../../screening/data_v2/base_color/test/valid/sketchfab__de__def4335c6f9b48c2a15db650781aa3b2_None.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>0</td><td>0.00</td><td>+0.00</td></tr><tr><td>Roughness</td><td>1</td><td>0.99</td><td>-0.01</td></tr><tr><td>Metallic</td><td>1</td><td>0.99</td><td>-0.01</td></tr><tr><td>Base Color</td><td>2</td><td>2.01</td><td>+0.01</td></tr></tbody></table>
+</section>
+
+<section class="case-card">
+  <div class="case-head"><div><h3>中等质量资产：连续分比硬分类更有意义</h3><p>这类样本不是简单好/坏，expected score 可以表达“有点可用但不强”的中间状态。</p></div><div class="case-score"><div>Final Score</div><strong>2.09</strong><span>Tier 4 (手游级)</span></div></div>
+  <div class="model-name">games__DD2__sm02_511_00mesh_None</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/train/invalid/games__DD2__sm02_511_00mesh_None.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/valid/games__DD2__sm02_511_00mesh_None.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/metallic/train/valid/games__DD2__sm02_511_00mesh_None.png" alt="metallic"><figcaption>Metallic</figcaption></figure><figure><img src="../../screening/data_v2/base_color/test/valid/games__DD2__sm02_511_00mesh_None.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>0</td><td>0.00</td><td>+0.00</td></tr><tr><td>Roughness</td><td>3</td><td>3.00</td><td>-0.00</td></tr><tr><td>Metallic</td><td>5</td><td>4.98</td><td>-0.02</td></tr><tr><td>Base Color</td><td>3</td><td>2.95</td><td>-0.05</td></tr></tbody></table>
+</section>
+
+<section class="case-card">
+  <div class="case-head"><div><h3>metallic 的典型问题：容易偏极端</h3><p>metallic 有信息量，但常把中间档推到 0 或 5 附近，所以需要校准。</p></div><div class="case-score"><div>Final Score</div><strong>2.13</strong><span>Tier 4 (手游级)</span></div></div>
+  <div class="model-name">sketchfab__70__7083ab76066f45708e159ea5056fb696</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/test/invalid/sketchfab__70__7083ab76066f45708e159ea5056fb696.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/valid/sketchfab__70__7083ab76066f45708e159ea5056fb696.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/metallic/val/valid/sketchfab__70__7083ab76066f45708e159ea5056fb696.png" alt="metallic"><figcaption>Metallic</figcaption></figure><figure><img src="../../screening/data_v2/base_color/test/valid/sketchfab__70__7083ab76066f45708e159ea5056fb696.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>0</td><td>1.08</td><td>+1.08</td></tr><tr><td>Roughness</td><td>3</td><td>3.72</td><td>+0.72</td></tr><tr><td>Metallic</td><td>4</td><td>0.00</td><td>-4.00</td></tr><tr><td>Base Color</td><td>4</td><td>4.12</td><td>+0.12</td></tr></tbody></table>
+</section>
+
+<section class="case-card">
+  <div class="case-head"><div><h3>base_color 的典型问题：排序有信号，边界不清楚</h3><p>base_color 的 expected MAE 不差，但二分类 F1 很低，说明它不适合单独当 valid/invalid gate。</p></div><div class="case-score"><div>Final Score</div><strong>1.94</strong><span>Tier 4 (手游级)</span></div></div>
+  <div class="model-name">3d66__9__98107_床头柜1</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/val/invalid/3d66__9__98107_床头柜1.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/valid/3d66__9__98107_床头柜1.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/metallic/train/valid/3d66__9__98107_床头柜1.png" alt="metallic"><figcaption>Metallic</figcaption></figure><figure><img src="../../screening/data_v2/base_color/train/valid/3d66__9__98107_床头柜1.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>0</td><td>0.00</td><td>+0.00</td></tr><tr><td>Roughness</td><td>2</td><td>0.76</td><td>-1.24</td></tr><tr><td>Metallic</td><td>5</td><td>4.86</td><td>-0.14</td></tr><tr><td>Base Color</td><td>3</td><td>0.30</td><td>-2.70</td></tr></tbody></table>
+</section>
+
+<section class="case-card">
+  <div class="case-head"><div><h3>失败案例：图片通道看起来不错，但 final score 被高估</h3><p>这是当前 scorer 的边界：它主要看 PBR/贴图质量，无法完全替代人工对资产可用性、风格和语义的综合判断。</p></div><div class="case-score"><div>Final Score</div><strong>0.66</strong><span>Tier 5 (勉强可用)</span></div></div>
+  <div class="model-name">games__AI_LIMIT__283_169_RGS_14_AI_Gang_AugustMale_Heavyset_None</div>
+  <div class="case-grid"><figure><img src="../../screening/data_v2/normal_map/train/invalid/games__AI_LIMIT__283_169_RGS_14_AI_Gang_AugustMale_Heavyset_None.png" alt="normal_map"><figcaption>Normal Map</figcaption></figure><figure><img src="../../screening/data_v2/roughness/train/invalid/games__AI_LIMIT__283_169_RGS_14_AI_Gang_AugustMale_Heavyset_None.png" alt="roughness"><figcaption>Roughness</figcaption></figure><figure><img src="../../screening/data_v2/base_color/test/invalid/games__AI_LIMIT__283_169_RGS_14_AI_Gang_AugustMale_Heavyset_None.png" alt="base_color"><figcaption>Base Color</figcaption></figure></div>
+  <table class="case-table"><thead><tr><th>通道</th><th>人工分</th><th>模型连续分</th><th>差值</th></tr></thead><tbody><tr><td>Normal Map</td><td>0</td><td>2.08</td><td>+2.08</td></tr><tr><td>Roughness</td><td>1</td><td>2.08</td><td>+1.08</td></tr><tr><td>Metallic</td><td>0</td><td>4.99</td><td>+4.99</td></tr><tr><td>Base Color</td><td>1</td><td>3.24</td><td>+2.24</td></tr></tbody></table>
+</section>
+  <section class="block"><h2>最终判断</h2><p>这个连续打分器已经能稳定提供 image-only 的 PBR/texture quality 信号。它最强的是 normal_map 和 roughness；metallic 和 base_color 不是没用，而是需要做校准，避免极端预测和二分类边界不稳。</p><p>所以现在合理的定位是：把它当作资产质量判断的“视觉质量特征提取器”，而不是最终人工评分替代品。后续和 embedding、fusion scorer 结合后，asset-level final score 的 MAE 已经可以降到约 0.329。</p></section>
+</div>
+</body>
+</html>

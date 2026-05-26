@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PBR Quality Scorer — 结果可视化</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0f1117; color: #e2e8f0; font-size: 14px; }
+  h1 { text-align: center; padding: 28px 0 8px; font-size: 22px; color: #f8fafc;
+       letter-spacing: .5px; }
+  .subtitle { text-align: center; color: #64748b; margin-bottom: 28px; font-size: 13px; }
+
+  /* Summary table */
+  .summary-wrap { max-width: 1060px; margin: 0 auto 36px; padding: 0 16px; }
+  table { width: 100%; border-collapse: collapse; background: #1e2330;
+          border-radius: 10px; overflow: hidden; }
+  th { background: #252d3d; color: #94a3b8; font-weight: 600;
+       padding: 10px 14px; text-align: center; font-size: 12px; letter-spacing: .4px; }
+  td { padding: 9px 14px; text-align: center; border-top: 1px solid #2a3142; }
+  tr:hover td { background: #232b3a; }
+  .ch-name { font-weight: 600; color: #93c5fd; text-align: left; }
+  .good { color: #4ade80; }
+  .ok   { color: #facc15; }
+  .bad  { color: #f87171; }
+
+  /* Channel cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(740px, 1fr));
+           gap: 24px; max-width: 1600px; margin: 0 auto; padding: 0 20px 40px; }
+  .card { background: #1a1f2e; border-radius: 14px; padding: 22px 24px;
+          border: 1px solid #2a3142; }
+  .card-title { font-size: 16px; font-weight: 700; color: #e2e8f0;
+                margin-bottom: 18px; display: flex; align-items: center; gap: 10px; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+         font-weight: 500; background: #253348; color: #60a5fa; }
+
+  /* Layout inside card */
+  .card-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+
+  /* Distribution bars */
+  .dist-section h3 { font-size: 12px; color: #64748b; margin-bottom: 12px;
+                     text-transform: uppercase; letter-spacing: .5px; }
+  .dist-row { display: flex; align-items: center; margin-bottom: 6px; gap: 6px; }
+  .dist-label { width: 18px; text-align: right; font-size: 12px; color: #94a3b8; }
+  .bar-wrap { flex: 1; height: 16px; background: #252d3d; border-radius: 3px;
+              position: relative; display: flex; }
+  .bar-gt  { height: 100%; background: #3b82f6; border-radius: 3px 0 0 3px;
+             transition: width .4s; min-width: 1px; }
+  .bar-pred{ height: 100%; background: #f97316; border-radius: 0 3px 3px 0;
+             transition: width .4s; min-width: 1px; }
+  .dist-pct { width: 80px; font-size: 11px; color: #64748b; white-space: nowrap; }
+
+  /* Legend */
+  .legend { display: flex; gap: 14px; margin-bottom: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #94a3b8; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; }
+
+  /* Per-score MAE */
+  .mae-bar-wrap { margin-bottom: 6px; }
+  .mae-bar { height: 14px; border-radius: 3px; transition: width .4s; }
+  .mae-val { font-size: 11px; color: #94a3b8; margin-left: 6px; }
+
+  /* Confusion matrix */
+  .cm-wrap { overflow-x: auto; }
+  .cm-table { border-collapse: collapse; width: 100%; }
+  .cm-table td, .cm-table th { width: 40px; height: 36px; text-align: center;
+    font-size: 11px; border: 1px solid #1a1f2e; }
+  .cm-axis-label { color: #475569; font-size: 10px; font-weight: 600; }
+  .cm-section h3 { font-size: 12px; color: #64748b; margin-bottom: 10px;
+                   text-transform: uppercase; letter-spacing: .5px; }
+  .cm-legend { font-size: 10px; color: #475569; margin-top: 6px; text-align: center; }
+
+  /* Skew alert */
+  .skew-bar { margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+              font-size: 12px; line-height: 1.6; }
+  .skew-ok   { background: #14271a; border: 1px solid #166534; color: #86efac; }
+  .skew-warn { background: #2a1a0e; border: 1px solid #7c2d12; color: #fdba74; }
+</style>
+</head>
+<body>
+
+<h1>PBR Quality Scorer — 测试集预测分析</h1>
+<p class="subtitle">测试集 · 各通道 best_mae 检查点 · 共 21,385 样本</p>
+
+<!-- ── Summary Table ─────────────────────────────────────────── -->
+<div class="summary-wrap">
+<table>
+  <thead>
+    <tr>
+      <th style="text-align:left">通道</th>
+      <th>MAE ↓</th><th>SRCC ↑</th><th>PLCC ↑</th>
+      <th>Acc ↑</th><th>within_1 ↑</th><th>QWK ↑</th><th>linK ↑</th><th>F1@0.5 ↑</th><th>bestF1 ↑</th>
+    </tr>
+  </thead>
+  <tbody id="summary-body"></tbody>
+</table>
+</div>
+
+<!-- ── Channel Cards ──────────────────────────────────────────── -->
+<div class="cards" id="cards"></div>
+
+<script>
+// ── Embedded data ────────────────────────────────────────────────
+const METRICS = {
+  normal_map: { mae:0.5942, srcc:0.7688, plcc:0.7701, acc:0.5825, w1:0.8960, qwk:0.7511, link:0.6267, f1:0.8574, bf1:0.8595,
+                per_mae:{0:0.5154,1:0.5437,2:0.6101,3:0.6129,4:1.1002,5:1.7344},
+                per_acc:{0:0.7167,1:0.5469,2:0.5024,3:0.4957,4:0.2155,5:0.0238},
+                per_n:  {0:2513, 1:640,  2:826,  3:1396, 4:283,  5:42} },
+  roughness:  { mae:0.5341, srcc:0.8280, plcc:0.8337, acc:0.5761, w1:0.9607, qwk:0.8094, link:0.6518, f1:0.7786, bf1:0.7815,
+                per_mae:{0:0.5885,1:0.6154,2:0.4884,3:0.4649,4:0.5786,5:0.9448},
+                per_acc:{0:0.5917,1:0.5470,2:0.6033,3:0.6298,4:0.4772,5:0.2075},
+                per_n:  {0:654,  1:905,  2:1656, 3:1610, 4:769,  5:106} },
+  metallic:   { mae:0.6257, srcc:0.8162, plcc:0.8149, acc:0.6355, w1:0.8581, qwk:0.8034, link:0.6967, f1:0.8014, bf1:0.8141,
+                per_mae:{0:0.8602,1:0.9173,2:1.6225,3:0.3776,4:0.7375,5:0.3016},
+                per_acc:{0:0.5041,1:0.4035,2:0.1481,3:0.7747,4:0.5836,5:0.8143},
+                per_n:  {0:613,  1:404,  2:351,  3:759,  4:634,  5:1524} },
+  base_color: { mae:0.4351, srcc:0.7463, plcc:0.7739, acc:0.6674, w1:0.9751, qwk:0.7322, link:0.5904, f1:0.5969, bf1:0.6500,
+                per_mae:{0:0.6870,1:1.2565,2:0.3841,3:0.3625,4:0.5268,5:0.8471},
+                per_acc:{0:0.6000,1:0.0864,2:0.7173,3:0.7427,4:0.5000,5:0.3191},
+                per_n:  {0:155,  1:81,   2:1132, 3:3167, 4:930,  5:235} },
+};
+
+const DIST = {
+  normal_map: {
+    gt:  {0:2513,1:640,2:826,3:1396,4:283,5:42},
+    pred:{0:1937,1:1014,2:1358,3:1151,4:238,5:2},
+    n: 5700
+  },
+  roughness: {
+    gt:  {0:654,1:905,2:1656,3:1610,4:769,5:106},
+    pred:{0:452,1:952,2:1657,3:1841,4:725,5:73},
+    n: 5700
+  },
+  metallic: {
+    gt:  {0:613,1:404,2:351,3:759,4:634,5:1524},
+    pred:{0:381,1:461,2:383,3:997,4:705,5:1358},
+    n: 4285
+  },
+  base_color: {
+    gt:  {0:155,1:81,2:1132,3:3167,4:930,5:235},
+    pred:{0:118,1:57,2:1321,3:3102,4:960,5:142},
+    n: 5700
+  },
+};
+
+const CM = {
+  normal_map: [[1801,366,215,114,17,0],[96,350,170,20,4,0],[31,213,415,148,19,0],[7,75,501,692,121,0],[2,10,54,155,61,1],[0,0,3,22,16,1]],
+  roughness:  [[387,219,44,4,0,0],[60,495,275,66,9,0],[4,217,999,403,33,0],[1,20,320,1014,247,8],[0,1,19,339,367,43],[0,0,0,15,69,22]],
+  metallic:   [[309,190,57,36,20,1],[58,163,98,54,31,0],[7,21,52,109,48,114],[3,37,86,588,44,1],[4,46,58,155,370,1],[0,4,32,55,192,1241]],
+  base_color: [[93,26,36,0,0,0],[5,7,47,19,2,1],[18,22,812,278,2,0],[2,2,423,2352,369,19],[0,0,3,415,465,47],[0,0,0,38,122,75]],
+};
+
+const CH_LABELS = {
+  normal_map: 'Normal Map',
+  roughness:  'Roughness',
+  metallic:   'Metallic',
+  base_color: 'Base Color',
+};
+
+const CHANNELS = ['normal_map','roughness','metallic','base_color'];
+const SCORE_COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#a855f7'];
+
+// ── Helpers ──────────────────────────────────────────────────────
+function fmt(v, d=4) { return v.toFixed(d); }
+function cls(v, lo, hi) {
+  return v>=hi ? 'good' : v>=lo ? 'ok' : 'bad';
+}
+
+// ── Summary Table ────────────────────────────────────────────────
+const tbody = document.getElementById('summary-body');
+CHANNELS.forEach(ch => {
+  const m = METRICS[ch];
+  tbody.innerHTML += `
+    <tr>
+      <td class="ch-name">${CH_LABELS[ch]}</td>
+      <td class="${cls(1-m.mae,.4,.6)}">${fmt(m.mae)}</td>
+      <td class="${cls(m.srcc,.75,.82)}">${fmt(m.srcc)}</td>
+      <td class="${cls(m.plcc,.75,.82)}">${fmt(m.plcc)}</td>
+      <td class="${cls(m.acc,.60,.70)}">${(m.acc*100).toFixed(1)}%</td>
+      <td class="${cls(m.w1,.92,.96)}">${(m.w1*100).toFixed(1)}%</td>
+      <td class="${cls(m.qwk,.72,.82)}">${fmt(m.qwk)}</td>
+      <td class="${cls(m.link,.62,.70)}">${fmt(m.link)}</td>
+      <td class="${cls(m.f1,.70,.80)}">${fmt(m.f1)}</td>
+      <td class="${cls(m.bf1,.75,.82)}">${fmt(m.bf1)}</td>
+    </tr>`;
+});
+
+// ── Cards ────────────────────────────────────────────────────────
+const cardsEl = document.getElementById('cards');
+
+CHANNELS.forEach(ch => {
+  const m = METRICS[ch];
+  const d = DIST[ch];
+  const cm = CM[ch];
+
+  // skew analysis
+  const predArr = Object.values(d.pred);
+  const gtArr   = Object.values(d.gt);
+  const predPct = predArr.map(v => v/d.n*100);
+  const gtPct   = gtArr.map(v => v/d.n*100);
+  const maxDiff = Math.max(...predPct.map((p,i) => Math.abs(p - gtPct[i])));
+  const pred5pct = (d.pred[5]||0)/d.n*100;
+  const gt5pct   = (d.gt[5]||0)/d.n*100;
+  const pred0pct = (d.pred[0]||0)/d.n*100;
+  const gt0pct   = (d.gt[0]||0)/d.n*100;
+
+  let skewMsg = '', skewClass = 'skew-ok';
+  const issues = [];
+  if ((d.pred[5]||0) < (d.gt[5]||0) * 0.5)
+    issues.push(`score=5 严重低预测：GT ${gt5pct.toFixed(1)}% → 预测只有 ${pred5pct.toFixed(1)}%`);
+  if ((d.pred[0]||0) < (d.gt[0]||0) * 0.6)
+    issues.push(`score=0 低预测：GT ${gt0pct.toFixed(1)}% → 预测 ${pred0pct.toFixed(1)}%`);
+  if (maxDiff > 8)
+    issues.push(`最大分布偏差 ${maxDiff.toFixed(1)}%（score 分布不均衡）`);
+  if (issues.length === 0)
+    issues.push('预测分布与真实分布吻合，无明显偏移');
+  else
+    skewClass = 'skew-warn';
+
+  skewMsg = issues.join('；');
+
+  // max for bar scaling
+  const maxGtPred = Math.max(...Object.values(d.gt), ...Object.values(d.pred));
+
+  // CM color scale
+  const rowMaxes = cm.map(row => Math.max(...row));
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="card-title">
+      ${CH_LABELS[ch]}
+      <span class="tag">n=${d.n.toLocaleString()}</span>
+      <span class="tag" style="color:#4ade80">SRCC ${fmt(m.srcc,3)}</span>
+      <span class="tag" style="color:#fb923c">MAE ${fmt(m.mae,3)}</span>
+    </div>
+    <div class="card-grid">
+
+      <!-- Distribution -->
+      <div class="dist-section">
+        <div class="legend">
+          <div class="legend-item"><div class="dot" style="background:#3b82f6"></div>真实分布 (GT)</div>
+          <div class="legend-item"><div class="dot" style="background:#f97316"></div>预测分布 (Pred)</div>
+        </div>
+        <h3>分数分布对比</h3>
+        ${[0,1,2,3,4,5].map(s => {
+          const gt = (d.gt[s]||0), pr = (d.pred[s]||0), n=d.n;
+          const gtW = (gt/maxGtPred*100).toFixed(1);
+          const prW = (pr/maxGtPred*100).toFixed(1);
+          return `<div class="dist-row">
+            <span class="dist-label">${s}</span>
+            <div class="bar-wrap">
+              <div class="bar-gt"  style="width:${gtW}%;max-width:50%"></div>
+              <div class="bar-pred" style="width:${prW}%;max-width:50%"></div>
+            </div>
+            <span class="dist-pct">${(gt/n*100).toFixed(1)}% → ${(pr/n*100).toFixed(1)}%</span>
+          </div>`;
+        }).join('')}
+        <div class="skew-bar ${skewClass}" style="margin-top:12px">${skewMsg}</div>
+      </div>
+
+      <!-- Per-score MAE + Acc -->
+      <div class="dist-section">
+        <h3>Per-Score MAE &amp; Acc</h3>
+        ${[0,1,2,3,4,5].map(s => {
+          const mae = m.per_mae[s] || 0;
+          const acc_s = (m.per_acc && m.per_acc[s] != null) ? m.per_acc[s] : null;
+          const n_s   = (m.per_n   && m.per_n[s]   != null) ? m.per_n[s]   : (d.gt[s]||0);
+          const barW = Math.min(mae / 2.0 * 100, 100).toFixed(1);
+          const col = mae > 1.2 ? '#f87171' : mae > 0.8 ? '#fb923c' : mae > 0.5 ? '#facc15' : '#4ade80';
+          const accStr = acc_s != null ? `<span style="color:#60a5fa;margin-left:6px">acc ${(acc_s*100).toFixed(0)}%</span>` : '';
+          return `<div class="dist-row">
+            <span class="dist-label">${s}</span>
+            <div class="bar-wrap" style="height:14px">
+              <div class="mae-bar" style="width:${barW}%;background:${col};height:100%;border-radius:3px"></div>
+            </div>
+            <span class="dist-pct">${mae.toFixed(3)}${accStr} <span style="color:#374151">n=${n_s}</span></span>
+          </div>`;
+        }).join('')}
+        <div style="margin-top:10px;font-size:11px;color:#475569">
+          Overall MAE: <span style="color:#e2e8f0">${fmt(m.mae,4)}</span> &nbsp;
+          Acc: <span style="color:#60a5fa">${(m.acc*100).toFixed(1)}%</span> &nbsp;
+          within_1: <span style="color:#e2e8f0">${(m.w1*100).toFixed(1)}%</span> &nbsp;
+          QWK: <span style="color:#a78bfa">${fmt(m.qwk,3)}</span>
+        </div>
+      </div>
+
+      <!-- Confusion Matrix -->
+      <div class="cm-section">
+        <h3>混淆矩阵（GT行 × Pred列）</h3>
+        <div class="cm-wrap">
+          <table class="cm-table">
+            <thead>
+              <tr>
+                <td class="cm-axis-label" style="font-size:9px">GT↓Pred→</td>
+                ${[0,1,2,3,4,5].map(s=>`<td class="cm-axis-label">${s}</td>`).join('')}
+              </tr>
+            </thead>
+            <tbody>
+              ${cm.map((row,gi) => {
+                const rowMax = rowMaxes[gi];
+                return `<tr>
+                  <td class="cm-axis-label">${gi}</td>
+                  ${row.map((v,pi) => {
+                    const pct = rowMax>0 ? v/rowMax : 0;
+                    const alpha = (0.05 + pct*0.85).toFixed(2);
+                    const textCol = pct > 0.5 ? '#fff' : '#94a3b8';
+                    const bg = gi===pi
+                      ? `rgba(74,222,128,${alpha})`
+                      : `rgba(239,68,68,${(pct*0.6).toFixed(2)})`;
+                    return `<td style="background:${bg};color:${textCol}">${v>0?v:''}</td>`;
+                  }).join('')}
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+          <div class="cm-legend">对角线=预测正确 (绿) · 偏离=预测错误 (红深=偏差大)</div>
+        </div>
+      </div>
+
+    </div>
+  `;
+  cardsEl.appendChild(card);
+});
+</script>
+</body>
+</html>

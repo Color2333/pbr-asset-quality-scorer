@@ -1,0 +1,12 @@
+{
+  "method": "tsne",
+  "total_assets": 37996,
+  "sampled_assets": 5000,
+  "input_dim": 6144,
+  "pca_dims": 50,
+  "seed": 42,
+  "outputs": {
+    "coords": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_viz/tsne/tsne_coords.csv",
+    "plot": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_viz/tsne/tsne_by_tier.png"
+  }
+}

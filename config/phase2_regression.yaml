@@ -1,0 +1,57 @@
+data:
+  tensor_cache_root: screening/cache_224_tensors
+  clip_feature_path: screening/features/clip_vitl14_openai_base_color_render.pt
+  split_image_root: screening/data_v2
+  labels_root: screening/data_38k
+  manifest_path: screening/channel_store_38k/manifest.csv
+  channels:
+    - normal_map
+    - roughness
+    - metallic
+    - base_color
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+
+train:
+  epochs: 30
+  batch_size: 96
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  patience: 8
+  binary_loss_weight: 0.2
+  defect_loss_weight: 0.1
+  ranking_loss_weight: 0.05
+  ranking_margin: 0.5
+  mid_oversample_factor: 4.0
+  huber_delta: 1.0
+  # Per-channel overrides (applied when --channel <name> is used)
+  channel_oversample:
+    base_color:
+      mid_oversample_factor: 8.0  # invalid only 4.1%
+      lo_score: 0                  # include score=0 in oversample (rare: 2.7%)
+      tail_oversample_factor: 16.0 # score=5 is 4.2% → extra boost
+      tail_lo_score: 5
+      binary_loss_weight: 0.5      # binary F1 was 0.622; invalid only 4.2% → up-weight binary
+    metallic:
+      hi_score: 4                  # exclude score=5 from oversample (already 27% of data, no boost needed)
+    normal_map:
+      tail_oversample_factor: 16.0 # score=5 only 0.9%, score=4 only 4.9% → severely underrepresented
+      tail_lo_score: 4             # boost score=4 and score=5
+    roughness:
+      tail_oversample_factor: 8.0  # score=5 only 2.0%
+      tail_lo_score: 5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/phase2_regression

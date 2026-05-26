@@ -1,0 +1,27 @@
+{
+  "valid_assets": 37447,
+  "sampled_assets": 30000,
+  "embedding_dim": 6144,
+  "pca_dims": 128,
+  "fusion_dim": 136,
+  "test_size": 0.2,
+  "seed": 42,
+  "final_score_regression": {
+    "baseline_mae": 0.7071002721786499,
+    "ridge_mae": 0.3306754529476166,
+    "ridge_r2": 0.7387155294418335,
+    "gbdt_mae": 0.328659616175131,
+    "gbdt_r2": 0.7394371779760708
+  },
+  "tier_classification": {
+    "baseline_acc": 0.37766666666666665,
+    "linear_acc": 0.6416666666666667,
+    "linear_macro_f1": 0.5358402929871466,
+    "gbdt_acc": 0.6861666666666667,
+    "gbdt_macro_f1": 0.5409174344900647
+  },
+  "outputs": {
+    "model": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/asset_fusion_scorer/fusion_scorer.pkl",
+    "summary": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/asset_fusion_scorer/fusion_summary.json"
+  }
+}

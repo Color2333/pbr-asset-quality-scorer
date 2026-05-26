@@ -1,0 +1,162 @@
+{
+  "output_root": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal",
+  "backbone": "base",
+  "channels": [
+    {
+      "channel": "normal_map",
+      "status": "ok",
+      "output_dir": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_normal_map_coral",
+      "epochs_ran": 30,
+      "completed_full_schedule": true,
+      "best": {
+        "ordinal_mae": 1.2235,
+        "within_1": 0.5711,
+        "binary_f1": 0.8615
+      },
+      "best_epochs": {
+        "ordinal_mae": 20,
+        "expected_mae": 23,
+        "within_1": 23,
+        "binary_f1": 21,
+        "binary_best_f1": 21
+      },
+      "best_values": {
+        "ordinal_mae": 1.2235,
+        "expected_mae": 0.6391,
+        "within_1": 0.5711,
+        "binary_f1": 0.8615,
+        "binary_best_f1": 0.8665
+      },
+      "last_values": {
+        "val_ordinal_mae": 1.2342,
+        "val_expected_mae": 0.6535,
+        "val_within_1": 0.5679,
+        "val_binary_f1": 0.8572,
+        "val_binary_best_f1": 0.8615
+      },
+      "checkpoints": {
+        "best.pt": true,
+        "best_ordinal_mae.pt": true,
+        "best_within_1.pt": true,
+        "best_binary_f1.pt": true
+      }
+    },
+    {
+      "channel": "roughness",
+      "status": "ok",
+      "output_dir": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_roughness_coral",
+      "epochs_ran": 30,
+      "completed_full_schedule": true,
+      "best": {
+        "ordinal_mae": 1.5321,
+        "within_1": 0.4584,
+        "binary_f1": 0.6813
+      },
+      "best_epochs": {
+        "ordinal_mae": 24,
+        "expected_mae": 24,
+        "within_1": 28,
+        "binary_f1": 5,
+        "binary_best_f1": 30
+      },
+      "best_values": {
+        "ordinal_mae": 1.5321,
+        "expected_mae": 0.6904,
+        "within_1": 0.4584,
+        "binary_f1": 0.6813,
+        "binary_best_f1": 0.7995
+      },
+      "last_values": {
+        "val_ordinal_mae": 1.5386,
+        "val_expected_mae": 0.7118,
+        "val_within_1": 0.4568,
+        "val_binary_f1": 0.6572,
+        "val_binary_best_f1": 0.7995
+      },
+      "checkpoints": {
+        "best.pt": true,
+        "best_ordinal_mae.pt": true,
+        "best_within_1.pt": true,
+        "best_binary_f1.pt": true
+      }
+    },
+    {
+      "channel": "metallic",
+      "status": "ok",
+      "output_dir": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_metallic_coral",
+      "epochs_ran": 23,
+      "completed_full_schedule": false,
+      "best": {
+        "ordinal_mae": 1.119,
+        "within_1": 0.6877,
+        "binary_f1": 0.8038
+      },
+      "best_epochs": {
+        "ordinal_mae": 16,
+        "expected_mae": 16,
+        "within_1": 16,
+        "binary_f1": 16,
+        "binary_best_f1": 14
+      },
+      "best_values": {
+        "ordinal_mae": 1.119,
+        "expected_mae": 0.6843,
+        "within_1": 0.6877,
+        "binary_f1": 0.8038,
+        "binary_best_f1": 0.8119
+      },
+      "last_values": {
+        "val_ordinal_mae": 1.1754,
+        "val_expected_mae": 0.7407,
+        "val_within_1": 0.6749,
+        "val_binary_f1": 0.7737,
+        "val_binary_best_f1": 0.809
+      },
+      "checkpoints": {
+        "best.pt": true,
+        "best_ordinal_mae.pt": true,
+        "best_within_1.pt": true,
+        "best_binary_f1.pt": true
+      }
+    },
+    {
+      "channel": "base_color",
+      "status": "ok",
+      "output_dir": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_base_color_coral",
+      "epochs_ran": 10,
+      "completed_full_schedule": false,
+      "best": {
+        "ordinal_mae": 1.8879,
+        "within_1": 0.2275,
+        "binary_f1": 0.3185
+      },
+      "best_epochs": {
+        "ordinal_mae": 1,
+        "expected_mae": 1,
+        "within_1": 3,
+        "binary_f1": 1,
+        "binary_best_f1": 9
+      },
+      "best_values": {
+        "ordinal_mae": 1.8879,
+        "expected_mae": 0.6185,
+        "within_1": 0.2275,
+        "binary_f1": 0.3185,
+        "binary_best_f1": 0.3361
+      },
+      "last_values": {
+        "val_ordinal_mae": 1.9963,
+        "val_expected_mae": 0.9167,
+        "val_within_1": 0.2239,
+        "val_binary_f1": 0.192,
+        "val_binary_best_f1": 0.3275
+      },
+      "checkpoints": {
+        "best.pt": true,
+        "best_ordinal_mae.pt": true,
+        "best_within_1.pt": true,
+        "best_binary_f1.pt": true
+      }
+    }
+  ]
+}

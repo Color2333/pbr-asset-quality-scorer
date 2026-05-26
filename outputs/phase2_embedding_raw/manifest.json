@@ -1,0 +1,15 @@
+{
+  "num_assets": 37996,
+  "embedding_dim": 6144,
+  "channels": [
+    "normal_map",
+    "roughness",
+    "metallic",
+    "base_color"
+  ],
+  "checkpoint_name": "best.pt",
+  "outputs": {
+    "embeddings": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_raw/asset_embeddings.npz",
+    "scores": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_raw/asset_scores.csv"
+  }
+}

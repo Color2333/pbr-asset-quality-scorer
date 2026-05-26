@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from typing import Iterable
+
+import numpy as np
+import torch
+
+from quality_scorer.ordinal import logits_to_class_probs, make_coral_levels
+
+
+def compute_pos_weight(scores: Iterable[int], num_classes: int, device: torch.device) -> torch.Tensor:
+    scores_tensor = torch.tensor(list(scores), dtype=torch.long)
+    if scores_tensor.numel() == 0:
+        return torch.ones(num_classes - 1, device=device)
+    levels = make_coral_levels(scores_tensor, num_classes)
+    pos = levels.sum(dim=0)
+    neg = levels.shape[0] - pos
+    return (neg / pos.clamp_min(1.0)).to(device)
+
+
+def binary_metrics(invalid_probs, scores, threshold: float, invalid_max_score: int) -> dict:
+    probs = np.asarray(list(invalid_probs), dtype=np.float32)
+    labels = (np.asarray(list(scores), dtype=np.int64) <= invalid_max_score).astype(np.int64)
+    preds = (probs >= threshold).astype(np.int64)
+    tp = int(((preds == 1) & (labels == 1)).sum())
+    fp = int(((preds == 1) & (labels == 0)).sum())
+    fn = int(((preds == 0) & (labels == 1)).sum())
+    tn = int(((preds == 0) & (labels == 0)).sum())
+    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    return {
+        "threshold": round(float(threshold), 4),
+        "f1": round(float(f1), 4),
+        "precision": round(float(precision), 4),
+        "recall": round(float(recall), 4),
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+    }
+
+
+def sweep_invalid_threshold(invalid_probs, scores, invalid_max_score: int, lo=0.05, hi=0.95, steps=45) -> dict:
+    best = None
+    for threshold in np.linspace(lo, hi, steps + 1):
+        metrics = binary_metrics(invalid_probs, scores, float(threshold), invalid_max_score)
+        if best is None or metrics["f1"] > best["f1"]:
+            best = metrics
+    return best or binary_metrics([], [], 0.5, invalid_max_score)
+
+
+@torch.no_grad()
+def eval_ordinal_epoch(
+    model,
+    dataloader,
+    device: torch.device,
+    num_classes: int,
+    invalid_max_score: int,
+) -> dict:
+    model.eval()
+    all_scores: list[int] = []
+    all_pred_scores: list[int] = []
+    all_invalid_probs: list[float] = []
+    all_expected_scores: list[float] = []
+
+    class_values = torch.arange(num_classes, device=device, dtype=torch.float32).view(1, -1)
+    for images, scores in dataloader:
+        images = images.to(device, non_blocking=True)
+        scores = scores.to(device, non_blocking=True)
+        logits = model(images)
+        class_probs = logits_to_class_probs(logits)
+        pred_scores = class_probs.argmax(dim=1)
+        invalid_probs = class_probs[:, : invalid_max_score + 1].sum(dim=1)
+        expected_scores = (class_probs * class_values).sum(dim=1)
+
+        all_scores.extend(scores.cpu().tolist())
+        all_pred_scores.extend(pred_scores.cpu().tolist())
+        all_invalid_probs.extend(invalid_probs.cpu().tolist())
+        all_expected_scores.extend(expected_scores.cpu().tolist())
+
+    labels = np.asarray(all_scores, dtype=np.int64)
+    argmax_preds = np.asarray(all_pred_scores, dtype=np.int64)
+    expected = np.asarray(all_expected_scores, dtype=np.float32)
+    # Round expected value → integer prediction (smoother than argmax)
+    expected_preds = np.clip(np.round(expected).astype(np.int64), 0, num_classes - 1)
+
+    acc = float((argmax_preds == labels).mean()) if labels.size else 0.0
+    ordinal_mae = float(np.abs(argmax_preds - labels).mean()) if labels.size else 0.0
+    expected_mae = float(np.abs(expected - labels).mean()) if labels.size else 0.0
+    within_1 = float((np.abs(argmax_preds - labels) <= 1).mean()) if labels.size else 0.0
+    expected_within_1 = float((np.abs(expected_preds - labels) <= 1).mean()) if labels.size else 0.0
+    return {
+        "ordinal_acc": round(acc, 4),
+        "ordinal_mae": round(ordinal_mae, 4),
+        "expected_mae": round(expected_mae, 4),
+        "within_1": round(within_1, 4),
+        "expected_within_1": round(expected_within_1, 4),
+        "binary_at_0_5": binary_metrics(all_invalid_probs, all_scores, 0.5, invalid_max_score),
+        "binary_best": sweep_invalid_threshold(all_invalid_probs, all_scores, invalid_max_score),
+    }

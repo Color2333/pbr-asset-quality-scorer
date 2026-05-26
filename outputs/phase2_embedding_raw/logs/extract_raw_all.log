@@ -1,0 +1,76 @@
+raw_assets=37996
+extracting normal_map: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_normal_map_coral/best.pt
+  normal_map: batch 20/297
+  normal_map: batch 40/297
+  normal_map: batch 60/297
+  normal_map: batch 80/297
+  normal_map: batch 100/297
+  normal_map: batch 120/297
+  normal_map: batch 140/297
+  normal_map: batch 160/297
+  normal_map: batch 180/297
+  normal_map: batch 200/297
+  normal_map: batch 220/297
+  normal_map: batch 240/297
+  normal_map: batch 260/297
+  normal_map: batch 280/297
+extracting roughness: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_roughness_coral/best.pt
+  roughness: batch 20/297
+  roughness: batch 40/297
+  roughness: batch 60/297
+  roughness: batch 80/297
+  roughness: batch 100/297
+  roughness: batch 120/297
+  roughness: batch 140/297
+  roughness: batch 160/297
+  roughness: batch 180/297
+  roughness: batch 200/297
+  roughness: batch 220/297
+  roughness: batch 240/297
+  roughness: batch 260/297
+  roughness: batch 280/297
+extracting metallic: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_metallic_coral/best.pt
+  metallic: batch 20/297
+  metallic: batch 40/297
+  metallic: batch 60/297
+  metallic: batch 80/297
+  metallic: batch 100/297
+  metallic: batch 120/297
+  metallic: batch 140/297
+  metallic: batch 160/297
+  metallic: batch 180/297
+  metallic: batch 200/297
+  metallic: batch 220/297
+  metallic: batch 240/297
+  metallic: batch 260/297
+  metallic: batch 280/297
+extracting base_color: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_base_color_coral/best.pt
+  base_color: batch 20/297
+  base_color: batch 40/297
+  base_color: batch 60/297
+  base_color: batch 80/297
+  base_color: batch 100/297
+  base_color: batch 120/297
+  base_color: batch 140/297
+  base_color: batch 160/297
+  base_color: batch 180/297
+  base_color: batch 200/297
+  base_color: batch 220/297
+  base_color: batch 240/297
+  base_color: batch 260/297
+  base_color: batch 280/297
+{
+  "num_assets": 37996,
+  "embedding_dim": 6144,
+  "channels": [
+    "normal_map",
+    "roughness",
+    "metallic",
+    "base_color"
+  ],
+  "checkpoint_name": "best.pt",
+  "outputs": {
+    "embeddings": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_raw/asset_embeddings.npz",
+    "scores": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding_raw/asset_scores.csv"
+  }
+}

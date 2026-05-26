@@ -1,0 +1,21 @@
+split=val common_assets=14
+extracting normal_map: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_normal_map_coral/best.pt
+extracting roughness: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_roughness_coral/best.pt
+extracting metallic: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_metallic_coral/best.pt
+extracting base_color: /storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase1_ordinal/convnext_base_base_color_coral/best.pt
+{
+  "split": "val",
+  "num_assets": 14,
+  "embedding_dim": 6144,
+  "channels": [
+    "normal_map",
+    "roughness",
+    "metallic",
+    "base_color"
+  ],
+  "checkpoint_name": "best.pt",
+  "outputs": {
+    "embeddings": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding/val/asset_embeddings.npz",
+    "scores": "/storage/datasets/art-data-intern/intern-container/haojiang_code/Pbr_auto/asset_quality_scorer/outputs/phase2_embedding/val/asset_scores.csv"
+  }
+}

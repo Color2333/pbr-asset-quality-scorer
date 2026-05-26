@@ -1,0 +1,28 @@
+{
+  "channel": "base_color",
+  "arch": "convnext_base_regression_clip",
+  "epoch": [
+    1
+  ],
+  "train_loss": [
+    0.1825
+  ],
+  "val_mae": [
+    0.4736
+  ],
+  "val_srcc": [
+    0.7347
+  ],
+  "val_plcc": [
+    0.7234
+  ],
+  "val_within_1": [
+    0.9537
+  ],
+  "val_binary_f1": [
+    0.0
+  ],
+  "val_binary_best_f1": [
+    0.3978
+  ]
+}

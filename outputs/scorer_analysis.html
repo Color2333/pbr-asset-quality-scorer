@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Continuous Scorer Analysis</title>
+<script src="scorer_viz_data.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f6fa; color: #2d3436; }
+h1 { padding: 28px 32px 8px; font-size: 22px; font-weight: 700; }
+.subtitle { padding: 0 32px 24px; color: #636e72; font-size: 14px; }
+.tabs { display: flex; gap: 6px; padding: 0 32px 0; border-bottom: 2px solid #dfe6e9; }
+.tab { padding: 10px 20px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 14px; font-weight: 500; color: #636e72; background: #e9ecef; border: none; }
+.tab.active { background: white; color: #2d3436; border-bottom: 2px solid white; margin-bottom: -2px; }
+.tab:hover:not(.active) { background: #dee2e6; }
+.page { display: none; padding: 28px 32px; }
+.page.active { display: block; }
+
+/* summary cards */
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+.card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); border-left: 4px solid; }
+.card-title { font-size: 12px; color: #636e72; text-transform: uppercase; letter-spacing: .5px; }
+.card-value { font-size: 28px; font-weight: 700; margin: 6px 0 2px; }
+.card-sub { font-size: 12px; color: #b2bec3; }
+.bad { color: #e17055; } .ok { color: #fdcb6e; } .good { color: #00b894; }
+
+/* section */
+.section { background: white; border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.section-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.section-desc { font-size: 13px; color: #636e72; margin-bottom: 20px; }
+
+/* bar chart */
+.bar-row { display: flex; align-items: center; margin-bottom: 10px; gap: 10px; }
+.bar-label { width: 90px; font-size: 13px; text-align: right; flex-shrink: 0; }
+.bar-track { flex: 1; height: 28px; background: #f0f2f5; border-radius: 4px; overflow: hidden; position: relative; }
+.bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: 12px; color: white; font-weight: 600; transition: width .4s; }
+.bar-num { width: 80px; font-size: 12px; color: #636e72; flex-shrink: 0; text-align: right; }
+
+/* confusion matrix */
+.conf-wrap { overflow-x: auto; }
+table.conf { border-collapse: collapse; }
+table.conf th, table.conf td { width: 60px; height: 48px; text-align: center; font-size: 13px; }
+table.conf th { background: #f8f9fa; font-weight: 600; color: #495057; }
+.conf-axis { font-size: 11px; color: #adb5bd; writing-mode: horizontal-tb; }
+.conf-row-label { font-weight: 600; }
+
+/* per-score table */
+table.ps { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.ps th { background: #f8f9fa; padding: 10px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #dee2e6; }
+table.ps td { padding: 9px 12px; border-bottom: 1px solid #f0f2f5; vertical-align: middle; }
+table.ps tr:last-child td { border-bottom: none; }
+.mini-bar { display: flex; gap: 2px; align-items: flex-end; height: 32px; }
+.mini-bar-col { width: 14px; background: #dee2e6; border-radius: 2px 2px 0 0; position: relative; }
+.mini-bar-col.highlight { background: #74b9ff; }
+.mini-bar-col.correct { background: #00b894; }
+.score-chip { display: inline-block; width: 26px; height: 26px; border-radius: 50%; text-align: center; line-height: 26px; font-weight: 700; font-size: 12px; color: white; }
+.mae-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+
+/* two-col */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } .cards { grid-template-columns: 1fr 1fr; } }
+
+.insight-box { background: #fff9e6; border-left: 4px solid #fdcb6e; padding: 14px 16px; border-radius: 0 8px 8px 0; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
+.insight-box.red { background: #fff5f5; border-color: #e17055; }
+.insight-box.green { background: #f0faf5; border-color: #00b894; }
+</style>
+</head>
+<body>
+
+<h1>Continuous Scorer — 预测质量分析</h1>
+<p class="subtitle">基于 37,996 个资产，4 个 PBR 通道的连续打分器效果深入分析</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="showPage('overview')">总览</button>
+  <button class="tab" onclick="showPage('metallic')">Metallic</button>
+  <button class="tab" onclick="showPage('roughness')">Roughness</button>
+  <button class="tab" onclick="showPage('normal_map')">Normal Map</button>
+  <button class="tab" onclick="showPage('base_color')">Base Color</button>
+</div>
+
+<!-- OVERVIEW PAGE -->
+<div id="page-overview" class="page active">
+  <div class="insight-box red">
+    <strong>⚠️ MAE 陷阱：</strong> 全局 MAE 数字本身具有误导性。模型实际上在大多数通道上学到的是「二值化」行为——预测值集中在 0 或 5，中间分数（1、2、3、4）的误差极大。MAE 看起来合理，但掩盖了中间等级预测完全失效的事实。
+  </div>
+
+  <div class="cards" id="summary-cards"></div>
+
+  <div class="two-col">
+    <div class="section">
+      <div class="section-title">各通道 — 真实标签分布</div>
+      <div class="section-desc">标签 0=最差，5=最好。注意 normal_map 和 metallic 的极端不均衡。</div>
+      <div id="label-dist-chart"></div>
+    </div>
+    <div class="section">
+      <div class="section-title">各通道 — 模型预测分布</div>
+      <div class="section-desc">对比真实分布，可见模型预测高度集中在 0 和 5 两极。</div>
+      <div id="pred-dist-chart"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">各分数段的 MAE 分解</div>
+    <div class="section-desc">纵轴为真实分数，颜色越红表示该分数段误差越大。中间分数 1-4 普遍误差 > 2。</div>
+    <div id="per-score-mae-chart"></div>
+  </div>
+</div>
+
+<!-- PER-CHANNEL PAGES -->
+<script>
+const CH_COLORS = {
+  metallic: '#4e79a7', roughness: '#f28e2b',
+  normal_map: '#59a14f', base_color: '#e15759'
+};
+const CH_NAMES = {
+  metallic: 'Metallic', roughness: 'Roughness',
+  normal_map: 'Normal Map', base_color: 'Base Color'
+};
+const SCORE_COLORS = ['#d63031','#e17055','#fdcb6e','#00cec9','#0984e3','#6c5ce7'];
+
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// create channel pages dynamically
+['metallic','roughness','normal_map','base_color'].forEach(ch => {
+  const div = document.createElement('div');
+  div.id = 'page-' + ch;
+  div.className = 'page';
+  div.innerHTML = `<div id="${ch}-content"></div>`;
+  document.body.appendChild(div);
+});
+
+function maePill(mae) {
+  let cls = mae > 2 ? 'bad' : mae > 1 ? 'ok' : 'good';
+  let bg = mae > 2 ? '#e17055' : mae > 1 ? '#fdcb6e' : '#00b894';
+  return `<span class="mae-pill" style="background:${bg};color:white">${mae.toFixed(2)}</span>`;
+}
+
+function scoreChip(s) {
+  return `<span class="score-chip" style="background:${SCORE_COLORS[s]}">${s}</span>`;
+}
+
+function buildOverview() {
+  // summary cards
+  const cards = document.getElementById('summary-cards');
+  ['metallic','roughness','normal_map','base_color'].forEach(ch => {
+    const d = SCORER_DATA[ch];
+    const mae = d.global_mae;
+    const w1 = (d.within_1 * 100).toFixed(1);
+    const maeClass = mae > 1.7 ? 'bad' : mae > 1.3 ? 'ok' : 'good';
+    const w1Class = w1 < 35 ? 'bad' : w1 < 55 ? 'ok' : 'good';
+    cards.innerHTML += `
+      <div class="card" style="border-color:${CH_COLORS[ch]}">
+        <div class="card-title">${CH_NAMES[ch]}</div>
+        <div class="card-value ${maeClass}">${mae}</div>
+        <div class="card-sub">全局 MAE（↓越好）</div>
+        <div style="margin-top:10px;font-size:13px">Within-1: <strong class="${w1Class}">${w1}%</strong></div>
+        <div style="font-size:12px;color:#b2bec3;margin-top:4px">${d.n_total.toLocaleString()} 样本</div>
+      </div>`;
+  });
+
+  // label dist chart
+  const maxN = Math.max(...['metallic','roughness','normal_map','base_color']
+    .flatMap(ch => SCORER_DATA[ch].label_dist));
+  const ld = document.getElementById('label-dist-chart');
+  ['metallic','roughness','normal_map','base_color'].forEach(ch => {
+    const d = SCORER_DATA[ch];
+    ld.innerHTML += `<div style="margin-bottom:12px"><div style="font-size:12px;font-weight:600;color:${CH_COLORS[ch]};margin-bottom:5px">${CH_NAMES[ch]}</div>`;
+    d.label_dist.forEach((n,s) => {
+      const pct = (n/d.n_total*100).toFixed(1);
+      const w = (n/maxN*100).toFixed(1);
+      ld.innerHTML += `<div class="bar-row">
+        <div class="bar-label">score ${s}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${SCORE_COLORS[s]}">${pct}%</div></div>
+        <div class="bar-num">${n.toLocaleString()}</div>
+      </div>`;
+    });
+    ld.innerHTML += '</div>';
+  });
+
+  // pred dist chart
+  const pd = document.getElementById('pred-dist-chart');
+  ['metallic','roughness','normal_map','base_color'].forEach(ch => {
+    const d = SCORER_DATA[ch];
+    pd.innerHTML += `<div style="margin-bottom:12px"><div style="font-size:12px;font-weight:600;color:${CH_COLORS[ch]};margin-bottom:5px">${CH_NAMES[ch]}</div>`;
+    d.pred_dist.forEach((n,s) => {
+      const pct = (n/d.n_total*100).toFixed(1);
+      const w = (n/maxN*100).toFixed(1);
+      // highlight 0 and 5 as poles
+      const bg = (s===0||s===5) ? '#e17055' : SCORE_COLORS[s];
+      pd.innerHTML += `<div class="bar-row">
+        <div class="bar-label">pred ${s}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${w}%;background:${bg}">${pct}%</div></div>
+        <div class="bar-num">${n.toLocaleString()}</div>
+      </div>`;
+    });
+    pd.innerHTML += '</div>';
+  });
+
+  // per-score MAE heatmap
+  const pm = document.getElementById('per-score-mae-chart');
+  let html = '<table class="ps"><thead><tr><th>通道</th>';
+  for(let s=0;s<6;s++) html += `<th>真实=${s}<br><span style="color:#adb5bd;font-size:11px">MAE</span></th>`;
+  html += '<th>全局MAE</th></tr></thead><tbody>';
+  ['metallic','roughness','normal_map','base_color'].forEach(ch => {
+    const d = SCORER_DATA[ch];
+    html += `<tr><td><strong style="color:${CH_COLORS[ch]}">${CH_NAMES[ch]}</strong></td>`;
+    d.per_score.forEach(ps => {
+      html += `<td style="text-align:center">${maePill(ps.mae)}<br><span style="font-size:11px;color:#adb5bd">n=${ps.n.toLocaleString()}</span></td>`;
+    });
+    html += `<td style="text-align:center">${maePill(d.global_mae)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  pm.innerHTML = html;
+}
+
+function buildChannelPage(ch) {
+  const d = SCORER_DATA[ch];
+  const color = CH_COLORS[ch];
+  const name = CH_NAMES[ch];
+  const el = document.getElementById(ch + '-content');
+
+  // insight
+  const bimodal = d.per_score.some(ps => ps.score > 0 && ps.score < 5 && ps.mae > 2.0);
+  el.innerHTML = `
+    <div class="insight-box ${bimodal ? 'red' : 'green'}">
+      <strong>${bimodal ? '⚠️ 二值化预测问题' : '✅ 预测较合理'}：</strong>
+      ${bimodal
+        ? '模型对中间分数（1-4）的预测中位数为 0 或 5，实际上退化为二分类，中间等级区分能力几乎为零。'
+        : '该通道预测分布相对均匀，模型保留了一定的序数区分能力。'}
+      全局 MAE = ${d.global_mae}，Within-1 = ${(d.within_1*100).toFixed(1)}%
+    </div>`;
+
+  // two-col: label dist + pred dist
+  el.innerHTML += `<div class="two-col">
+    <div class="section">
+      <div class="section-title">真实标签分布</div>
+      <div class="section-desc">数据集中各分数的实际样本数</div>
+      <div id="${ch}-label-dist"></div>
+    </div>
+    <div class="section">
+      <div class="section-title">模型预测分布</div>
+      <div class="section-desc">红色柱（0和5）占比过高说明模型二值化</div>
+      <div id="${ch}-pred-dist"></div>
+    </div>
+  </div>`;
+
+  // confusion matrix
+  el.innerHTML += `<div class="section">
+    <div class="section-title">预测混淆矩阵（真实 vs 预测取整）</div>
+    <div class="section-desc">行=真实分数，列=预测分数（四舍五入）。对角线绿色为正确预测，偏离对角线说明错误严重程度。</div>
+    <div class="conf-wrap" id="${ch}-conf"></div>
+  </div>`;
+
+  // per-score breakdown
+  el.innerHTML += `<div class="section">
+    <div class="section-title">各分数段详细分析</div>
+    <div class="section-desc">每个真实分数下，模型实际预测到各等级的数量分布，以及该分数段的 MAE。</div>
+    <div id="${ch}-persc"></div>
+  </div>`;
+
+  // fill label dist
+  const maxL = Math.max(...d.label_dist);
+  const ld = document.getElementById(ch+'-label-dist');
+  d.label_dist.forEach((n,s) => {
+    const pct = (n/d.n_total*100).toFixed(1);
+    ld.innerHTML += `<div class="bar-row">
+      <div class="bar-label">score ${s}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(n/maxL*100).toFixed(1)}%;background:${SCORE_COLORS[s]}">${pct}%</div></div>
+      <div class="bar-num">${n.toLocaleString()}</div>
+    </div>`;
+  });
+
+  // fill pred dist
+  const maxP = Math.max(...d.pred_dist);
+  const pd2 = document.getElementById(ch+'-pred-dist');
+  d.pred_dist.forEach((n,s) => {
+    const pct = (n/d.n_total*100).toFixed(1);
+    const bg = (s===0||s===5) ? '#e17055' : SCORE_COLORS[s];
+    pd2.innerHTML += `<div class="bar-row">
+      <div class="bar-label">pred ${s}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(n/maxP*100).toFixed(1)}%;background:${bg}">${pct}%</div></div>
+      <div class="bar-num">${n.toLocaleString()}</div>
+    </div>`;
+  });
+
+  // confusion matrix
+  const conf = d.conf;
+  const rowMax = conf.map(row => Math.max(...row));
+  let cht = '<table class="conf"><thead><tr><th></th><th class="conf-axis" colspan="6">← 预测分数 →</th></tr><tr><th></th>';
+  for(let j=0;j<6;j++) cht += `<th>${j}</th>`;
+  cht += '</tr></thead><tbody>';
+  for(let i=0;i<6;i++) {
+    cht += `<tr><td class="conf-row-label" style="color:${SCORE_COLORS[i]}">${i}</td>`;
+    for(let j=0;j<6;j++) {
+      const v = conf[i][j];
+      const frac = rowMax[i] > 0 ? v/rowMax[i] : 0;
+      const bg = i===j
+        ? `rgba(0,184,148,${0.15+frac*0.85})`
+        : frac > 0.05 ? `rgba(225,112,85,${frac*0.9})` : '#fff';
+      const bold = i===j ? 'font-weight:700' : '';
+      cht += `<td style="background:${bg};${bold}">${v > 0 ? v.toLocaleString() : '–'}</td>`;
+    }
+    cht += '</tr>';
+  }
+  cht += '</tbody></table>';
+  document.getElementById(ch+'-conf').innerHTML = cht;
+
+  // per-score table
+  let tbl = '<table class="ps"><thead><tr><th>真实分数</th><th>样本数</th><th>预测均值</th><th>预测中位数</th><th>MAE</th><th>预测分布（0→5）</th></tr></thead><tbody>';
+  d.per_score.forEach(ps => {
+    const maxPD = Math.max(...ps.pred_dist, 1);
+    const miniCols = ps.pred_dist.map((c,k) => {
+      const h = Math.max(4, Math.round(c/maxPD*30));
+      const cls = k===ps.score ? 'correct' : (k===0||k===5) ? 'highlight' : '';
+      const title = `pred=${k}: ${c}`;
+      return `<div class="mini-bar-col ${cls}" style="height:${h}px" title="${title}"></div>`;
+    }).join('');
+
+    tbl += `<tr>
+      <td style="text-align:center">${scoreChip(ps.score)}</td>
+      <td>${ps.n.toLocaleString()}</td>
+      <td>${ps.mean_pred}</td>
+      <td><strong>${ps.median_pred}</strong></td>
+      <td>${maePill(ps.mae)}</td>
+      <td><div class="mini-bar">${miniCols}</div>
+          <div style="font-size:11px;color:#adb5bd;margin-top:2px">
+            ${ps.pred_dist.map((c,k)=>`<span style="color:${k===ps.score?'#00b894':''}">${k}:${c}</span>`).join(' ')}
+          </div>
+      </td>
+    </tr>`;
+  });
+  tbl += '</tbody></table>';
+  document.getElementById(ch+'-persc').innerHTML = tbl;
+}
+
+// build all
+buildOverview();
+['metallic','roughness','normal_map','base_color'].forEach(buildChannelPage);
+</script>
+
+</body>
+</html>
