@@ -1,0 +1,57 @@
+# Rung B: 分辨率消融 — 与 convnext_base_baseline.yaml 完全相同, 仅把输入从 224 换成 448。
+# 源图 2048², 224 丢了 98.8% 像素; 此实验隔离"分辨率"单一变量。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/448
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+  channels:
+    - normal_map
+    - roughness
+    - metallic
+    - base_color
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+
+train:
+  epochs: 30
+  batch_size: 32          # 448 = 4× 224 激活, 降 batch 防 OOM
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  patience: 8
+  binary_loss_weight: 0.2
+  defect_loss_weight: 0.1
+  ranking_loss_weight: 0.05
+  ranking_margin: 0.5
+  mid_oversample_factor: 4.0
+  huber_delta: 1.0
+  channel_oversample:
+    base_color:
+      mid_oversample_factor: 8.0
+      lo_score: 0
+      tail_oversample_factor: 16.0
+      tail_lo_score: 5
+      binary_loss_weight: 0.5
+    metallic:
+      hi_score: 4
+    normal_map:
+      tail_oversample_factor: 16.0
+      tail_lo_score: 4
+    roughness:
+      tail_oversample_factor: 8.0
+      tail_lo_score: 5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: baseline_448

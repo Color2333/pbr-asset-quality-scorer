@@ -1,0 +1,50 @@
+# 破局点1: metallic 跨通道空间一致性
+# 核心假设: metallic 质量是"该不该是金属(看 render/base_color) vs metallic map 给得对不对"
+# 的跨通道一致性判断, 单看灰度 metallic 图无信号(79% 近全黑)。
+# SpatialAuxFusion 让 metallic 的 stage4 feature map 与 render/base_color 的 map
+# 做 patch 级 cross-attention, 显式建模"render 这块看着像金属 → metallic 这块该不该亮"。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+  channels:
+    - metallic
+  aux_channels:
+    metallic: [render, base_color]
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  aux_proj_dim: 256
+  aux_fusion_mode: spatial   # patch 级一致性 (vs pooled 向量)
+  aux_trainable: true        # 共享 backbone 随解冻学跨通道特征
+
+train:
+  epochs: 30
+  batch_size: 32             # spatial + trainable aux = 3 次带梯度 backbone forward, 降 batch 防 OOM
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  patience: 8
+  binary_loss_weight: 0.2
+  defect_loss_weight: 0.1
+  ranking_loss_weight: 0.05
+  ranking_margin: 0.5
+  mid_oversample_factor: 4.0
+  huber_delta: 1.0
+  channel_oversample:
+    metallic:
+      hi_score: 4
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: aux_render_spatial

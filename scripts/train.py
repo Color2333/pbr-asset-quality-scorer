@@ -20,7 +20,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "asset_quality_scorer"
@@ -30,7 +29,7 @@ sys.path.insert(0, str(PACKAGE_ROOT))
 from quality_scorer.constants import ALL_CHANNELS
 from quality_scorer.data import CHANNEL_DEFECT_COLS, TensorCacheCLIPDataset, build_score_lookup
 from quality_scorer.metrics import eval_regression_epoch
-from quality_scorer.models import ConvNeXtRegressionScorer
+from quality_scorer.models import build_model
 
 
 def _resolve(p: str | Path) -> Path:
@@ -61,7 +60,7 @@ def _save_checkpoint(out_dir, fname, model, optimizer, epoch, channel, args, met
         epoch=epoch,
         model_state_dict=model.state_dict(),
         channel=channel,
-        arch="convnext_base",
+        arch=args.arch,
         invalid_max_score=args.invalid_max_score,
         defect_cols=CHANNEL_DEFECT_COLS.get(channel, []),
         val_metrics=metrics,
@@ -93,7 +92,7 @@ def _ranking_loss(pred: torch.Tensor, target: torch.Tensor, margin: float) -> to
 
 def train_channel(args: argparse.Namespace, channel: str) -> dict:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    exp_id  = f"convnext_base_{channel}_{args.exp_suffix}"
+    exp_id  = f"{args.arch}_{channel}_{args.exp_suffix}"
     out_dir = _resolve(args.output_root) / exp_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,9 +105,38 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
     print(f"  defect labels   : {defect_cols or '(none)'}")
     print(f"  output_dir      : {out_dir}")
 
-    score_by_model = build_score_lookup(_resolve(args.labels_root), channel)
+    if args.csv_path:
+        score_by_model = {}
+    else:
+        score_by_model = build_score_lookup(_resolve(args.labels_root), channel)
+
+    channel_cls_path = None
+    if args.channel_cls_path:
+        p = _resolve(args.channel_cls_path)
+        if p.exists():
+            channel_cls_path = p
+            print(f"  channel_cls     : {p}")
+        else:
+            print(f"  channel_cls     : (not found at {p}, prompts disabled)")
+
+    aux_chs: list[str] = (args.aux_channels or {}).get(channel, [])
+    if aux_chs:
+        print(f"  aux_channels    : {aux_chs}")
 
     def _ds(split, is_train):
+        if args.csv_path:
+            return TensorCacheCLIPDataset(
+                tensor_cache_root=_resolve(args.tensor_cache_root),
+                clip_feature_path=_resolve(args.clip_feature_path),
+                split=split,
+                channel=channel,
+                csv_path=_resolve(args.csv_path),
+                channel_cls_path=channel_cls_path,
+                aux_channels=aux_chs,
+                invalid_max_score=args.invalid_max_score,
+                is_train=is_train,
+                defect_cols=defect_cols,
+            )
         return TensorCacheCLIPDataset(
             tensor_cache_root=_resolve(args.tensor_cache_root),
             clip_feature_path=_resolve(args.clip_feature_path),
@@ -116,6 +144,8 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
             split=split,
             channel=channel,
             score_by_model=score_by_model,
+            channel_cls_path=channel_cls_path,
+            aux_channels=aux_chs,
             invalid_max_score=args.invalid_max_score,
             is_train=is_train,
             manifest_path=_resolve(args.manifest_path) if args.manifest_path else None,
@@ -137,15 +167,28 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
     train_loader = _make_loader(train_ds, args.batch_size, args.num_workers, sampler=sampler)
     val_loader   = _make_loader(val_ds,   args.batch_size * 2, args.num_workers)
 
-    model = ConvNeXtRegressionScorer(
-        clip_dim=args.clip_dim,
+    # Infer actual clip_dim from dataset (accounts for prompt sim concat)
+    actual_clip_dim = train_ds.clip_dim
+    print(f"  clip_dim        : {actual_clip_dim}"
+          + (f" (1536 CLS + {actual_clip_dim - 1536} prompt sims)" if actual_clip_dim != 1536 else ""))
+
+    use_aux = len(aux_chs) > 0
+    model = build_model(
+        args.arch,
+        clip_dim=actual_clip_dim,
         attn_proj_dim=args.attn_proj_dim,
         attn_heads=args.attn_heads,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         n_defect_labels=len(defect_cols),
         freeze_features=True,
+        use_aux=use_aux,
+        aux_proj_dim=args.aux_proj_dim,
+        aux_fusion_mode=args.aux_fusion_mode,
+        aux_trainable=args.aux_trainable,
     ).to(device)
+    if use_aux:
+        print(f"  aux_fusion      : mode={args.aux_fusion_mode}  trainable={args.aux_trainable}")
 
     print(f"  binary_loss_w   : {args.binary_loss_weight}")
     print(f"  defect_loss_w   : {args.defect_loss_weight}  (labels: {defect_cols})")
@@ -163,7 +206,7 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
     optimizer = make_opt()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    log = dict(channel=channel, arch="convnext_base", exp_id=exp_id,
+    log = dict(channel=channel, arch=args.arch, exp_id=exp_id,
                epoch=[], train_loss=[], val_mae=[], val_srcc=[], val_plcc=[],
                val_within_1=[], val_binary_f1=[], val_binary_best_f1=[])
     best = dict(mae=float("inf"), srcc=-2.0, binary_f1=-1.0)
@@ -187,17 +230,16 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
 
         model.train()
         running = 0.0
-        for imgs, clips, scores, binaries, defects in tqdm(
-            train_loader, desc=f"  epoch {epoch:>2}/{args.epochs}", leave=False
-        ):
+        for imgs, aux_imgs, clips, scores, binaries, defects in train_loader:
             imgs     = imgs.to(device, non_blocking=True)
+            aux_imgs = aux_imgs.to(device, non_blocking=True)
             clips    = clips.to(device, non_blocking=True)
             scores   = scores.to(device, non_blocking=True)
             binaries = binaries.to(device, non_blocking=True)
             defects  = defects.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            pred_score, binary_logit, defect_logits = model(imgs, clips)
+            pred_score, binary_logit, defect_logits = model(imgs, clips, aux_imgs)
 
             loss = F.huber_loss(pred_score, scores, delta=args.huber_delta)
             if args.binary_loss_weight > 0:
@@ -279,11 +321,18 @@ def parse_args() -> argparse.Namespace:
 
     args.tensor_cache_root       = d["tensor_cache_root"]
     args.clip_feature_path       = d["clip_feature_path"]
-    args.split_image_root        = d["split_image_root"]
-    args.labels_root             = d["labels_root"]
+    args.csv_path                = d.get("csv_path")
+    args.channel_cls_path        = d.get("channel_cls_path")
+    args.aux_channels            = d.get("aux_channels", {})   # dict: channel → [aux_ch, ...]
+    args.split_image_root        = d.get("split_image_root", "")
+    args.labels_root             = d.get("labels_root", "")
     args.manifest_path           = d.get("manifest_path")
+    args.arch                    = m.get("arch", "convnext_base")
     args.clip_dim                = int(m.get("clip_dim", 1536))
     args.attn_proj_dim           = int(m.get("attn_proj_dim", 256))
+    args.aux_proj_dim            = int(m.get("aux_proj_dim", 256))
+    args.aux_fusion_mode         = m.get("aux_fusion_mode", "pooled")
+    args.aux_trainable           = bool(m.get("aux_trainable", False))
     args.attn_heads              = int(m.get("attn_heads", 4))
     args.hidden_dim              = int(m.get("hidden_dim", 512))
     args.dropout                 = float(m.get("dropout", 0.3))

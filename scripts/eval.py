@@ -35,9 +35,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PACKAGE_ROOT))
 
 from quality_scorer.constants import ALL_CHANNELS
-from quality_scorer.data import CHANNEL_DEFECT_COLS, TensorCacheCLIPDataset, build_score_lookup
+from quality_scorer.data import CHANNEL_DEFECT_COLS, TensorCacheCLIPDataset
 from quality_scorer.metrics import binary_metrics, sweep_invalid_threshold
-from quality_scorer.models import ConvNeXtRegressionScorer
+from quality_scorer.models import build_model
 
 RUNS_ROOT = PACKAGE_ROOT / "outputs" / "runs"
 
@@ -78,26 +78,42 @@ def eval_run(run_dir: Path, channel: str, ckpt_name: str, device: torch.device) 
     defect_cols = ckpt.get("defect_cols", CHANNEL_DEFECT_COLS.get(channel, []))
     state = ckpt["model_state_dict"]
     has_clip_direct = any(k.startswith("clip_direct") for k in state)
+    # spatial fusion → aux_fusion.pos_embed; any aux → aux_fusion.* present
+    spatial_aux = any(k.startswith("aux_fusion.pos_embed") for k in state)
+    use_aux     = any(k.startswith("aux_fusion") for k in state)
+    aux_fusion_mode = "spatial" if spatial_aux else "pooled"
+    # Auto-detect clip_dim: LayerNorm weight in clip_direct has shape [clip_dim]
+    if has_clip_direct and "clip_direct.0.weight" in state:
+        clip_dim = int(state["clip_direct.0.weight"].shape[0])
+    else:
+        # Infer from cross_modal stage proj + fusion input dim
+        clip_dim = 1536
 
-    model = ConvNeXtRegressionScorer(
-        clip_dim=1536, attn_proj_dim=256, attn_heads=4, hidden_dim=512, dropout=0.0,
+    arch = ckpt.get("arch", "convnext_base")
+    model = build_model(
+        arch,
+        clip_dim=clip_dim, attn_proj_dim=256, attn_heads=4, hidden_dim=512, dropout=0.0,
         n_defect_labels=len(defect_cols), freeze_features=False,
         use_clip_direct=has_clip_direct,
+        use_aux=use_aux, aux_proj_dim=256, aux_fusion_mode=aux_fusion_mode,
     ).to(device)
     model.load_state_dict(state)
     model.eval()
 
-    score_by_model = build_score_lookup(_resolve("screening/data_38k"), channel)
+    # with_prompts models have clip_dim > 1536 (prompt sims appended)
+    channel_cls_path = (
+        _resolve("asset_quality_scorer/features/clip_vitl14_openai_scoring_channels.pt")
+        if clip_dim > 1536 else None
+    )
     test_ds = TensorCacheCLIPDataset(
-        tensor_cache_root=_resolve("screening/cache_224_tensors"),
-        clip_feature_path=_resolve("screening/features/clip_vitl14_openai_base_color_render.pt"),
-        split_image_root=_resolve("screening/data_v2") / channel,
+        tensor_cache_root=_resolve("asset_quality_scorer/cache/224"),
+        clip_feature_path=_resolve("asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt"),
+        csv_path=_resolve("asset_quality_scorer/dataset/sampled_all.csv"),
+        channel_cls_path=channel_cls_path,
         split="test",
         channel=channel,
-        score_by_model=score_by_model,
         invalid_max_score=invalid_max_score,
         is_train=False,
-        manifest_path=_resolve("screening/channel_store_38k/manifest.csv"),
         defect_cols=defect_cols,
     )
     loader = DataLoader(test_ds, batch_size=128, num_workers=4, pin_memory=device.type == "cuda")
@@ -105,11 +121,14 @@ def eval_run(run_dir: Path, channel: str, ckpt_name: str, device: torch.device) 
 
     all_scores, all_preds, all_binary_probs, all_scores_int = [], [], [], []
     with torch.no_grad():
-        for images, clip_feats, scores, _, _defects in loader:
+        # dataset returns 6-tuple: (img, aux_imgs, clip_feat, score, binary, defects)
+        for batch in loader:
+            images, _aux, clip_feats, scores, _binary, _defects = batch
             images     = images.to(device, non_blocking=True)
             clip_feats = clip_feats.to(device, non_blocking=True)
             scores     = scores.to(device, non_blocking=True)
-            pred_score, binary_logit, _ = model(images, clip_feats)
+            # aux_images=None → AuxFusion uses empty fallback (main_proj only)
+            pred_score, binary_logit, _ = model(images, clip_feats, aux_images=None)
             binary_prob = torch.sigmoid(binary_logit)
             all_scores.extend(scores.cpu().tolist())
             all_preds.extend(pred_score.cpu().tolist())

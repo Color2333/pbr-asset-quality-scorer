@@ -132,11 +132,12 @@ def eval_regression_epoch(
     all_binary_probs: list[float] = []
     all_true_scores_int: list[int] = []
 
-    for images, clip_feats, scores, _, _defects in dataloader:
+    for images, aux_imgs, clip_feats, scores, _, _defects in dataloader:
         images     = images.to(device, non_blocking=True)
+        aux_imgs   = aux_imgs.to(device, non_blocking=True)
         clip_feats = clip_feats.to(device, non_blocking=True)
         scores     = scores.to(device, non_blocking=True)
-        pred_score, binary_logit, _defect_logits = model(images, clip_feats)
+        pred_score, binary_logit, _defect_logits = model(images, clip_feats, aux_imgs)
         binary_prob = torch.sigmoid(binary_logit)
 
         all_scores.extend(scores.cpu().tolist())

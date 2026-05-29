@@ -1,0 +1,48 @@
+# 破局点1 在 38k 原始数据上重训 (对照 49k 版 convnext_base_metallic_aux_spatial.yaml)
+# 目的: 49k 上 metallic 卡 0.57, 验证是架构问题还是 49k 数据/标签问题。
+# 38k 用原始标签 + 自带 train/val/test (26596/5700/5700), 无 49k 的重采样污染。
+# 关键: 38k metallic 是双峰分布 (0:10620, 5:10221 各~28%, 中段 score2 仅 2318),
+#       按用户要求保留真实分布 -> 不做均匀过采样 (mid_oversample_factor=1.0)。
+data:
+  tensor_cache_root: screening/cache_224_tensors
+  clip_feature_path: screening/features/clip_vitl14_openai_base_color_render.pt
+  csv_path: asset_quality_scorer/dataset/screening_38k.csv
+  channels:
+    - metallic
+  aux_channels:
+    metallic: [render, base_color]
+
+model:
+  arch: convnext_base
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  aux_proj_dim: 256
+  aux_fusion_mode: spatial
+  aux_trainable: true
+
+train:
+  epochs: 30
+  batch_size: 32
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  patience: 8
+  binary_loss_weight: 0.2
+  defect_loss_weight: 0.1
+  ranking_loss_weight: 0.05
+  ranking_margin: 0.5
+  mid_oversample_factor: 1.0     # 自然分布, 不过采样 (保留真实双峰)
+  huber_delta: 1.0
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: aux_spatial_38k

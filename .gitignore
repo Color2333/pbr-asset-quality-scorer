@@ -23,3 +23,14 @@ outputs/nohup.out
 
 # OS
 .DS_Store
+
+# Tensor caches (uint8 memmaps, 100s of GB) — NEVER commit
+*.npy
+cache/
+
+# CLIP feature dumps (derived, large)
+features/
+
+# Training logs & outputs (checkpoints, run artifacts)
+logs/
+outputs/
