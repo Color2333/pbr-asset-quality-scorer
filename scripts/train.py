@@ -206,6 +206,14 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
     optimizer = make_opt()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # Mixed precision: bf16 when supported (no GradScaler needed — full fp32 range),
+    # else fp16 + GradScaler. ~1.5-2× faster at high resolution.
+    use_amp = args.amp and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
+    if use_amp:
+        print(f"  amp             : {('bfloat16' if amp_dtype==torch.bfloat16 else 'float16')}")
+
     log = dict(channel=channel, arch=args.arch, exp_id=exp_id,
                epoch=[], train_loss=[], val_mae=[], val_srcc=[], val_plcc=[],
                val_within_1=[], val_binary_f1=[], val_binary_best_f1=[])
@@ -239,21 +247,23 @@ def train_channel(args: argparse.Namespace, channel: str) -> dict:
             defects  = defects.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            pred_score, binary_logit, defect_logits = model(imgs, clips, aux_imgs)
+            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                pred_score, binary_logit, defect_logits = model(imgs, clips, aux_imgs)
 
-            loss = F.huber_loss(pred_score, scores, delta=args.huber_delta)
-            if args.binary_loss_weight > 0:
-                loss = loss + args.binary_loss_weight * F.binary_cross_entropy_with_logits(
-                    binary_logit, binaries)
-            if args.defect_loss_weight > 0 and defect_logits is not None and defects.shape[1] > 0:
-                loss = loss + args.defect_loss_weight * F.binary_cross_entropy_with_logits(
-                    defect_logits, defects)
-            if args.ranking_loss_weight > 0:
-                loss = loss + args.ranking_loss_weight * _ranking_loss(
-                    pred_score, scores, args.ranking_margin)
+                loss = F.huber_loss(pred_score, scores, delta=args.huber_delta)
+                if args.binary_loss_weight > 0:
+                    loss = loss + args.binary_loss_weight * F.binary_cross_entropy_with_logits(
+                        binary_logit, binaries)
+                if args.defect_loss_weight > 0 and defect_logits is not None and defects.shape[1] > 0:
+                    loss = loss + args.defect_loss_weight * F.binary_cross_entropy_with_logits(
+                        defect_logits, defects)
+                if args.ranking_loss_weight > 0:
+                    loss = loss + args.ranking_loss_weight * _ranking_loss(
+                        pred_score, scores, args.ranking_margin)
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running += float(loss.item())
 
         scheduler.step()
@@ -349,6 +359,7 @@ def parse_args() -> argparse.Namespace:
     args.ranking_loss_weight     = float(t.get("ranking_loss_weight", 0.05))
     args.ranking_margin          = float(t.get("ranking_margin", 0.5))
     args.huber_delta             = float(t.get("huber_delta", 1.0))
+    args.amp                     = bool(t.get("amp", True))   # mixed precision (bf16/fp16)
 
     channel_for_override = args.channel or None
     _ovr = t.get("channel_oversample", {}).get(channel_for_override, {}) if channel_for_override else {}
