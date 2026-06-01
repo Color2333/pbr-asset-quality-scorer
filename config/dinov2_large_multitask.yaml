@@ -1,0 +1,43 @@
+# Multi-task: DINOv2 shared backbone + 4 channel heads + FiLM on metallic.
+# Hypothesis: strong channels (roughness 0.895, base_color 0.841) inject
+# quality-relevant gradients that regularise the backbone → metallic benefits.
+# FiLM: CLIP render CLS → (γ,β) → re-scale metallic's fused representation,
+# injecting "render-based material expectation" before the metallic head.
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: true         # FiLM: render CLS → (γ,β) on metallic head
+  metallic_grad_scale: 0.5    # down-weight metallic→backbone gradient (noisy labels)
+
+train:
+  epochs: 30
+  batch_size: 12              # 4 channel images per sample × DINOv2-L → tight
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:            # loss weight per channel
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5           # higher weight to compensate noisier labels
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: film_v1

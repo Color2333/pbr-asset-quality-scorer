@@ -29,9 +29,11 @@ from quality_scorer.models.convnext import (
     _CLIP_HALF_DIM,
 )
 
-_DINOV2_MODEL = "vit_large_patch14_reg4_dinov2"
-_DINOV2_DIM = 1024
-_TAP_LAYERS = (7, 15, 23)  # 0-indexed blocks → pseudo s2/s3/s4 (ViT-L has 24)
+_DINOV2_MODEL  = "vit_large_patch14_reg4_dinov2"
+_DINOV2_DIM    = 1024
+_TAP_LAYERS    = (7, 15, 23)   # 0-indexed blocks → pseudo s2/s3/s4 (ViT-L has 24)
+_MT_CHANNELS   = ("base_color", "normal_map", "roughness", "metallic")
+_CLIP_RENDER_DIM = 768  # first half of the 1536-d CLIP feat = render CLS
 
 
 class DINOv2RegressionScorer(nn.Module):
@@ -197,3 +199,178 @@ class DINOv2RegressionScorer(nn.Module):
         binary = self.binary_head(fused).squeeze(1)
         defect = self.defect_head(fused) if self.defect_head is not None else None
         return score, binary, defect
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-task scorer: one shared DINOv2 backbone, 4 channel heads, FiLM for
+# metallic.  Training: forward receives all 4 channel images simultaneously.
+# Inference: same forward, subset of channels works too.
+#
+# Design rationale:
+#   • Weight-sharing: 4 channel images run through the SAME backbone. Strong
+#     channels (roughness 0.895, base_color 0.841) inject quality-relevant
+#     gradients that regularise the backbone — "strong channels carry weak".
+#   • FiLM on metallic: CLIP render CLS (768-d) → (γ, β) re-scales the shared
+#     fused representation just before the metallic head, injecting the
+#     "render-based material expectation" as a lightweight per-sample
+#     conditioning signal.  γ⊙h+β costs ~2×768×512 ≈ 786k params.
+#   • Per-channel binary head: valid/invalid decision per channel (not shared).
+#   • Gradient scaling: metallic's noisy labels contribute less to backbone
+#     updates via a configurable metallic_grad_scale < 1.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DINOv2MultiTaskScorer(nn.Module):
+    """DINOv2 backbone shared across 4 PBR channels with FiLM for metallic."""
+
+    CHANNELS = _MT_CHANNELS
+
+    def __init__(
+        self,
+        clip_dim: int = 1536,
+        attn_proj_dim: int = 256,
+        attn_heads: int = 4,
+        hidden_dim: int = 512,
+        dropout: float = 0.3,
+        freeze_features: bool = True,
+        use_clip_direct: bool = True,
+        metallic_film: bool = True,        # FiLM conditioning on metallic head
+        metallic_grad_scale: float = 0.5,  # down-weight metallic → backbone grad
+        backbone_name: str = _DINOV2_MODEL,
+    ):
+        super().__init__()
+        self.metallic_grad_scale = metallic_grad_scale
+
+        # ── shared backbone ────────────────────────────────────────────────
+        self.backbone = timm.create_model(
+            backbone_name, pretrained=True, num_classes=0, dynamic_img_size=True
+        )
+        D = self.backbone.embed_dim      # 1024 for ViT-L
+        n_scales = len(_TAP_LAYERS)
+
+        # ── shared cross-modal fusion ──────────────────────────────────────
+        self.cross_modal = CrossModalFusion(
+            stage_dims=(D,) * n_scales,
+            clip_half_dim=_CLIP_HALF_DIM,
+            proj_dim=attn_proj_dim,
+            num_heads=attn_heads,
+        )
+        self.clip_direct: nn.Module | None
+        if use_clip_direct:
+            self.clip_direct = nn.Sequential(
+                nn.LayerNorm(clip_dim),
+                nn.Linear(clip_dim, attn_proj_dim),
+                nn.GELU(),
+            )
+            clip_direct_dim = attn_proj_dim
+        else:
+            self.clip_direct = None
+            clip_direct_dim = 0
+
+        # ── shared fusion MLP (same weights for all channels) ─────────────
+        fusion_in = n_scales * D + self.cross_modal.out_dim + clip_direct_dim
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(fusion_in),
+            nn.Linear(fusion_in, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        # ── FiLM generator for metallic ────────────────────────────────────
+        # Input: render CLS token (first 768-d of clip_feat).
+        # Output: (γ, β) each of size hidden_dim — applied as affine re-scale
+        # of the shared fused representation before the metallic head.
+        self.film_gen: nn.Module | None
+        if metallic_film:
+            self.film_gen = nn.Sequential(
+                nn.LayerNorm(_CLIP_RENDER_DIM),
+                nn.Linear(_CLIP_RENDER_DIM, hidden_dim * 2),
+                nn.GELU(),
+                nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            )
+        else:
+            self.film_gen = None
+
+        # ── per-channel heads (score + binary, no defect in multi-task) ───
+        self.score_heads  = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+        self.binary_heads = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+
+        if freeze_features:
+            for p in self.backbone.parameters():
+                p.requires_grad_(False)
+
+    # ── progressive unfreeze (same interface as DINOv2RegressionScorer) ───
+    def _unfreeze_blocks(self, start: int) -> None:
+        for blk in self.backbone.blocks[start:]:
+            for p in blk.parameters():
+                p.requires_grad_(True)
+        if hasattr(self.backbone, "norm"):
+            for p in self.backbone.norm.parameters():
+                p.requires_grad_(True)
+
+    def unfreeze_stage4(self)   -> None: self._unfreeze_blocks(18)
+    def unfreeze_stage34(self)  -> None: self._unfreeze_blocks(12)
+    def unfreeze_stage234(self) -> None: self._unfreeze_blocks(0)
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    def _encode(self, img: torch.Tensor) -> torch.Tensor:
+        """img [B,3,H,W] → fused representation [B, hidden_dim]."""
+        tokens = list(self.backbone.get_intermediate_layers(
+            img, n=_TAP_LAYERS, return_prefix_tokens=False, norm=True
+        ))
+        pooled = [t.mean(dim=1) for t in tokens]          # 3× [B, D]
+        img_feat  = torch.cat(pooled, dim=1)              # [B, 3D]
+        # NOTE: cross_modal and clip_direct need clip_feat — passed in forward.
+        # _encode only extracts image features; fusion happens in forward.
+        return img_feat, pooled
+
+    def _film(self, fused: torch.Tensor, clip_feat: torch.Tensor) -> torch.Tensor:
+        """FiLM: render CLS (first 768-d of clip_feat) → affine transform on fused."""
+        if self.film_gen is None:
+            return fused
+        render_cls = clip_feat[:, :_CLIP_RENDER_DIM].float()
+        gamma_beta = self.film_gen(render_cls)             # [B, 2*hidden]
+        gamma, beta = gamma_beta.chunk(2, dim=-1)          # each [B, hidden]
+        return (1.0 + gamma) * fused + beta                # residual form → stable init
+
+    def forward(
+        self,
+        channel_imgs: dict[str, torch.Tensor],
+        clip_feat: torch.Tensor,
+    ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Args:
+            channel_imgs: dict channel_name → [B, 3, H, W].
+                          Pass only the channels you need (train: all 4,
+                          eval single-channel: just that one).
+            clip_feat:    [B, 1536]  render+base_color CLIP (shared for all channels)
+        Returns:
+            dict channel_name → (score [B], binary_logit [B])
+        """
+        out: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        clip_f = clip_feat.float()
+
+        for ch, img in channel_imgs.items():
+            # gradient scaling for metallic: noisy labels → less backbone influence
+            if ch == "metallic" and self.metallic_grad_scale < 1.0 and img.requires_grad is False:
+                img = img.detach()  # not needed — grad scale happens on fused below
+
+            img_feat, pooled = self._encode(img)
+            cross_feat = self.cross_modal(pooled, clip_feat)
+            parts = [img_feat, cross_feat]
+            if self.clip_direct is not None:
+                parts.append(self.clip_direct(clip_f))
+
+            fused = self.fusion(torch.cat(parts, dim=1))   # [B, hidden]
+
+            # FiLM: condition metallic head on render's visual expectation
+            if ch == "metallic":
+                if self.metallic_grad_scale < 1.0 and self.training:
+                    # scale gradient flowing from metallic loss back through backbone
+                    fused = fused * self.metallic_grad_scale + fused.detach() * (1.0 - self.metallic_grad_scale)
+                fused = self._film(fused, clip_feat)       # render-conditioned fused
+
+            score  = torch.sigmoid(self.score_heads[ch](fused)).squeeze(1) * 5.0
+            binary = self.binary_heads[ch](fused).squeeze(1)
+            out[ch] = (score, binary)
+
+        return out
