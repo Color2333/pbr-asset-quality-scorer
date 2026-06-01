@@ -169,18 +169,24 @@ def train(cfg: dict) -> None:
 
     # ── model ──────────────────────────────────────────────────────────────
     model = DINOv2MultiTaskScorer(
-        clip_dim           = int(m.get("clip_dim", 1536)),
-        attn_proj_dim      = int(m.get("attn_proj_dim", 256)),
-        attn_heads         = int(m.get("attn_heads", 4)),
-        hidden_dim         = int(m.get("hidden_dim", 512)),
-        dropout            = float(m.get("dropout", 0.3)),
-        freeze_features    = True,
-        use_clip_direct    = True,
-        metallic_film      = bool(m.get("metallic_film", True)),
-        metallic_grad_scale= float(m.get("metallic_grad_scale", 0.5)),
+        clip_dim            = int(m.get("clip_dim", 1536)),
+        attn_proj_dim       = int(m.get("attn_proj_dim", 256)),
+        attn_heads          = int(m.get("attn_heads", 4)),
+        hidden_dim          = int(m.get("hidden_dim", 512)),
+        dropout             = float(m.get("dropout", 0.3)),
+        freeze_features     = True,
+        use_clip_direct     = True,
+        metallic_film       = bool(m.get("metallic_film", True)),
+        metallic_grad_scale = float(m.get("metallic_grad_scale", 0.5)),
+        use_cross_channel   = bool(m.get("use_cross_channel", False)),
+        cc_n_heads          = int(m.get("cc_n_heads", 4)),
+        cc_me_bc_bias       = float(m.get("cc_me_bc_bias", 1.0)),
+        cc_me_ro_bias       = float(m.get("cc_me_ro_bias", 1.0)),
     ).to(device)
+    cc = model.cross_channel
     print(f"  metallic_film={model.film_gen is not None}  "
-          f"metallic_grad_scale={model.metallic_grad_scale}")
+          f"metallic_grad_scale={model.metallic_grad_scale}  "
+          f"cross_channel={cc is not None}")
 
     # per-channel loss weights
     ch_weights = {ch: float(t.get("channel_weights", {}).get(ch, 1.0)) for ch in _CHANNELS}
@@ -291,6 +297,16 @@ def train(cfg: dict) -> None:
     for ch in _CHANNELS:
         mc = best["per_channel"][ch]
         print(f"  {ch:12s}: mae={mc['mae']}  srcc={mc['srcc']}")
+
+    # Diagnostic: what cross-channel attention did the model actually learn?
+    if model.cross_channel is not None:
+        bias_summary = model.cross_channel.get_attn_bias_summary()
+        print("\n  Learned cross-channel attention biases (non-zero):")
+        for pair, val in sorted(bias_summary.items(), key=lambda x: -abs(x[1])):
+            bar = "█" * int(abs(val) * 5)
+            print(f"    {pair}: {val:+.3f}  {bar}")
+        best["attn_bias"] = bias_summary
+
     (out_dir / "summary.json").write_text(json.dumps({"exp_id": exp_id, **best}, indent=2))
 
 

@@ -35,6 +35,181 @@ _TAP_LAYERS    = (7, 15, 23)   # 0-indexed blocks → pseudo s2/s3/s4 (ViT-L has
 _MT_CHANNELS   = ("base_color", "normal_map", "roughness", "metallic")
 _CLIP_RENDER_DIM = 768  # first half of the 1536-d CLIP feat = render CLS
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-Channel Interaction Block
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CrossChannelBlock(nn.Module):
+    """4-token transformer block for cross-channel quality reasoning.
+
+    Each PBR channel's fused representation becomes one token. A single round
+    of multi-head self-attention lets all channels reason about each other
+    before their individual score heads — encoding the annotator's logic:
+
+        "metallic quality depends on what base_color (material appearance) and
+         roughness (surface smoothness) say about the same region."
+
+    Design choices:
+      • Manual MHA: needed so we can inject the SOP-motivated additive bias
+        directly into the pre-softmax attention logits.
+      • Learnable SOP bias: initialized with physical prior (metallic attends
+        more to base_color and roughness), but freely adapted during training.
+        If the prior is wrong the model learns to ignore it (→ 0); if it is
+        right the model amplifies it. Never hurts, potentially helps a lot.
+      • Channel identity embedding: each token carries a learned tag so the
+        model knows "this 512-d vector represents the roughness channel". Without
+        this all tokens look identical to the attention — the model can't tell
+        which channel it's reading from.
+      • Residual + LayerNorm: standard transformer stability. Cross-channel
+        signal is add-on; if useless, gradients drive it to zero.
+      • Small FFN: allows non-linear reasoning after attention (e.g. "metallic
+        is white AND roughness is low → this is consistent → boost score").
+      • Graceful degradation: missing channels are filled with zero vectors +
+        channel embedding, so single-channel inference still works.
+    """
+
+    CHANNELS = _MT_CHANNELS  # fixed ordering: bc, nm, ro, me
+    _CH_IDX  = {ch: i for i, ch in enumerate(_MT_CHANNELS)}
+
+    def __init__(
+        self,
+        dim: int = 512,
+        n_heads: int = 4,
+        dropout: float = 0.1,
+        me_bc_init_bias: float = 1.0,
+        me_ro_init_bias: float = 1.0,
+        # If True, mask out bc/nm/ro → metallic attention (prevent metallic's
+        # noisy representation from polluting the cleaner channels).
+        # The asymmetry implements: metallic CAN read others, others CANNOT
+        # read metallic — matching the intended data flow from the SOP.
+        asymmetric_mask: bool = True,
+    ):
+        super().__init__()
+        assert dim % n_heads == 0
+        self.dim      = dim
+        self.n_heads  = n_heads
+        self.head_dim = dim // n_heads
+
+        self.channel_embed = nn.Embedding(len(self.CHANNELS), dim)
+
+        self.Wq = nn.Linear(dim, dim, bias=False)
+        self.Wk = nn.Linear(dim, dim, bias=False)
+        self.Wv = nn.Linear(dim, dim, bias=False)
+        self.out_proj = nn.Linear(dim, dim)
+        self.attn_drop = nn.Dropout(dropout)
+
+        # SOP-motivated additive attention bias [n_heads, n_ch, n_ch].
+        n = len(self.CHANNELS)
+        init_bias = torch.zeros(n_heads, n, n)
+        me = self._CH_IDX["metallic"]
+        bc = self._CH_IDX["base_color"]
+        ro = self._CH_IDX["roughness"]
+        init_bias[:, me, bc] = me_bc_init_bias
+        init_bias[:, me, ro] = me_ro_init_bias
+        self.attn_bias = nn.Parameter(init_bias)
+
+        # Asymmetric mask: block bc/nm/ro from attending to metallic.
+        # Registered as a buffer (not a parameter) — never trained, never saved
+        # to checkpoint in a way that causes shape mismatches.
+        if asymmetric_mask:
+            # -inf in positions [q, me] for q != me cuts off those paths entirely
+            mask = torch.zeros(n, n)
+            for q in range(n):
+                if q != me:
+                    mask[q, me] = float('-inf')   # bc/nm/ro cannot read metallic
+            self.register_buffer('hard_mask', mask)   # [n, n]
+        else:
+            self.register_buffer('hard_mask', torch.zeros(n, n))
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.ffn   = nn.Sequential(
+            nn.Linear(dim, dim * 2), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(dim * 2, dim),
+        )
+        self.norm2 = nn.LayerNorm(dim)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        # Small init for stability: cross-channel starts near identity
+        for m in [self.Wq, self.Wk, self.Wv, self.out_proj]:
+            nn.init.xavier_uniform_(m.weight, gain=0.5)
+        nn.init.zeros_(self.out_proj.weight)   # out_proj → 0 at init
+        # channel_embed: normal init so channels are distinguishable from day 1
+        nn.init.normal_(self.channel_embed.weight, std=0.02)
+
+    def forward(
+        self,
+        channel_feats: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            channel_feats: {ch_name: [B, dim]} — may be a subset of CHANNELS.
+                           Missing channels are padded with zeros.
+        Returns:
+            refined: {ch_name: [B, dim]} for every key in channel_feats.
+        """
+        B = next(iter(channel_feats.values())).shape[0]
+        device = next(iter(channel_feats.values())).device
+        n = len(self.CHANNELS)
+
+        # Build token sequence [B, n_ch, dim] — zero for absent channels
+        tokens = torch.zeros(B, n, self.dim, device=device,
+                             dtype=next(iter(channel_feats.values())).dtype)
+        present = []
+        for ch, feat in channel_feats.items():
+            i = self._CH_IDX[ch]
+            tokens[:, i] = feat
+            present.append(i)
+
+        # Add channel identity embeddings (all positions, including absent ones)
+        ids = torch.arange(n, device=device)
+        tokens = tokens + self.channel_embed(ids).unsqueeze(0)  # [B, n, dim]
+
+        # ── Multi-head self-attention with SOP bias ────────────────────────
+        def split_heads(x):
+            # x: [B, n, dim] → [B, n_heads, n, head_dim]
+            return x.view(B, n, self.n_heads, self.head_dim).transpose(1, 2)
+
+        Q = split_heads(self.Wq(tokens))   # [B, n_heads, n, head_dim]
+        K = split_heads(self.Wk(tokens))
+        V = split_heads(self.Wv(tokens))
+
+        scale = self.head_dim ** -0.5
+        # Raw attention logits [B, n_heads, n, n]
+        attn_logits = (Q @ K.transpose(-2, -1)) * scale
+        # Add SOP prior bias (broadcast over batch)
+        attn_logits = attn_logits + self.attn_bias.unsqueeze(0)
+        # Hard asymmetric mask: sets bc/nm/ro→metallic to -inf before softmax
+        # so those paths contribute exactly 0 — metallic's noise cannot
+        # flow back into the cleaner channels' representations.
+        attn_logits = attn_logits + self.hard_mask.unsqueeze(0).unsqueeze(0)
+
+        attn_w = torch.softmax(attn_logits, dim=-1)
+        attn_w = self.attn_drop(attn_w)
+        # [B, n_heads, n, head_dim] → [B, n, dim]
+        attn_out = (attn_w @ V).transpose(1, 2).reshape(B, n, self.dim)
+        attn_out = self.out_proj(attn_out)
+
+        # Residual 1: add cross-channel signal to original tokens
+        tokens = self.norm1(tokens + attn_out)
+
+        # FFN + Residual 2
+        tokens = self.norm2(tokens + self.ffn(tokens))
+
+        # Return only the channels that were passed in
+        return {ch: tokens[:, self._CH_IDX[ch]] for ch in channel_feats}
+
+    def get_attn_bias_summary(self) -> dict:
+        """Diagnostic: return mean attention bias per channel pair (for logging)."""
+        bias = self.attn_bias.mean(0).detach().cpu()  # [n_ch, n_ch]
+        return {
+            f"{self.CHANNELS[q]}→{self.CHANNELS[k]}": round(float(bias[q, k]), 3)
+            for q in range(len(self.CHANNELS))
+            for k in range(len(self.CHANNELS))
+            if q != k and abs(float(bias[q, k])) > 0.05
+        }
+
 
 class DINOv2RegressionScorer(nn.Module):
 
@@ -233,8 +408,12 @@ class DINOv2MultiTaskScorer(nn.Module):
         dropout: float = 0.3,
         freeze_features: bool = True,
         use_clip_direct: bool = True,
-        metallic_film: bool = True,        # FiLM conditioning on metallic head
-        metallic_grad_scale: float = 0.5,  # down-weight metallic → backbone grad
+        metallic_film: bool = True,          # FiLM conditioning on metallic head
+        metallic_grad_scale: float = 0.5,   # down-weight metallic → backbone grad
+        use_cross_channel: bool = False,     # CrossChannelBlock after fusion MLP
+        cc_n_heads: int = 4,
+        cc_me_bc_bias: float = 1.0,         # SOP prior: metallic→base_color
+        cc_me_ro_bias: float = 1.0,         # SOP prior: metallic→roughness
         backbone_name: str = _DINOV2_MODEL,
     ):
         super().__init__()
@@ -289,6 +468,17 @@ class DINOv2MultiTaskScorer(nn.Module):
             )
         else:
             self.film_gen = None
+
+        # ── cross-channel interaction (optional) ──────────────────────────
+        self.cross_channel: nn.Module | None
+        if use_cross_channel:
+            self.cross_channel = CrossChannelBlock(
+                dim=hidden_dim, n_heads=cc_n_heads,
+                me_bc_init_bias=cc_me_bc_bias,
+                me_ro_init_bias=cc_me_ro_bias,
+            )
+        else:
+            self.cross_channel = None
 
         # ── per-channel heads (score + binary, no defect in multi-task) ───
         self.score_heads  = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
@@ -349,26 +539,31 @@ class DINOv2MultiTaskScorer(nn.Module):
         out: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         clip_f = clip_feat.float()
 
+        # ── Step 1: encode each channel independently ─────────────────────
+        fused_per_ch: dict[str, torch.Tensor] = {}
         for ch, img in channel_imgs.items():
-            # gradient scaling for metallic: noisy labels → less backbone influence
-            if ch == "metallic" and self.metallic_grad_scale < 1.0 and img.requires_grad is False:
-                img = img.detach()  # not needed — grad scale happens on fused below
-
             img_feat, pooled = self._encode(img)
             cross_feat = self.cross_modal(pooled, clip_feat)
             parts = [img_feat, cross_feat]
             if self.clip_direct is not None:
                 parts.append(self.clip_direct(clip_f))
 
-            fused = self.fusion(torch.cat(parts, dim=1))   # [B, hidden]
+            fused = self.fusion(torch.cat(parts, dim=1))  # [B, hidden]
 
-            # FiLM: condition metallic head on render's visual expectation
+            # FiLM: condition metallic fused on render CLS
             if ch == "metallic":
                 if self.metallic_grad_scale < 1.0 and self.training:
-                    # scale gradient flowing from metallic loss back through backbone
                     fused = fused * self.metallic_grad_scale + fused.detach() * (1.0 - self.metallic_grad_scale)
-                fused = self._film(fused, clip_feat)       # render-conditioned fused
+                fused = self._film(fused, clip_feat)
 
+            fused_per_ch[ch] = fused
+
+        # ── Step 2: cross-channel interaction (all channels reason together) ─
+        if self.cross_channel is not None and len(fused_per_ch) > 1:
+            fused_per_ch = self.cross_channel(fused_per_ch)
+
+        # ── Step 3: per-channel score heads ───────────────────────────────
+        for ch, fused in fused_per_ch.items():
             score  = torch.sigmoid(self.score_heads[ch](fused)).squeeze(1) * 5.0
             binary = self.binary_heads[ch](fused).squeeze(1)
             out[ch] = (score, binary)
