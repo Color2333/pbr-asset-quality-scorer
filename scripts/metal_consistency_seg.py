@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.stats import spearmanr
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models.segmentation import DeepLabV3_ResNet50_Weights, deeplabv3_resnet50
 
@@ -125,36 +126,53 @@ def metal_iou(pred_bin: torch.Tensor, gt_bin: torch.Tensor) -> torch.Tensor:
     return inter / union.clamp_min(1.0)
 
 
+def dice_bce_loss(logit, target, dice_w=1.0, eps=1.0):
+    """BCE + soft-Dice. Dice counters the strong background bias (metal is a
+    small-fraction class), which plain BCE under-segments."""
+    bce = F.binary_cross_entropy_with_logits(logit, target)
+    p = torch.sigmoid(logit)
+    num = 2 * (p * target).flatten(1).sum(1) + eps
+    den = (p + target).flatten(1).sum(1) + eps
+    dice = (1 - num / den).mean()
+    return bce + dice_w * dice
+
+
 @torch.no_grad()
-def evaluate(model, loader, device, mask_thresh):
+def evaluate(model, loader, device, amp_dtype):
+    """Returns per-sample (metal-IoU, score, actual_metal_coverage)."""
     model.eval()
-    ious, scores = [], []
+    ious, scores, cover = [], [], []
     for inp, mask, score, _ in loader:
         inp = inp.to(device)
-        logit = model(inp)["out"]
+        with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
+            logit = model(inp)["out"].float()
         pred = (torch.sigmoid(logit) > 0.5).float().cpu()
-        ious.append(metal_iou(pred, mask))
+        gt = (mask > 0.5).float()
+        ious.append(metal_iou(pred, gt))
         scores.append(score)
-    ious = torch.cat(ious).numpy()
-    scores = torch.cat(scores).numpy()
-    return ious, scores
+        cover.append(gt.flatten(1).mean(1))
+    return (torch.cat(ious).numpy(), torch.cat(scores).numpy(), torch.cat(cover).numpy())
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cache-root", default="asset_quality_scorer/cache/224")
     p.add_argument("--csv", default="asset_quality_scorer/dataset/sampled_all.csv")
-    p.add_argument("--mask-thresh", type=int, default=102)   # 0.4 * 255
+    p.add_argument("--mask-thresh", type=int, default=128)   # 0.5 * 255 (matches has_metal def)
     p.add_argument("--hi-score", type=int, default=4)         # pseudo-GT from score >= this
-    p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--batch-size", type=int, default=24)
+    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--batch-size", type=int, default=12)      # 448 + deeplabv3 6ch
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--dice-weight", type=float, default=1.0)
+    p.add_argument("--has-metal-thresh", type=float, default=0.05)  # metal_ratio> this = has_metal
+    p.add_argument("--no-amp", action="store_true")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--device", default=None)
-    p.add_argument("--out", default="asset_quality_scorer/outputs/runs/metal_consistency_seg")
+    p.add_argument("--out", default="asset_quality_scorer/outputs/runs/metal_consistency_seg_448")
     args = p.parse_args()
 
     dev = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    amp_dtype = None if args.no_amp else (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
     root = PROJECT_ROOT / args.cache_root
     csvp = PROJECT_ROOT / args.csv
     out = PROJECT_ROOT / args.out
@@ -176,17 +194,22 @@ def main():
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=args.lr, weight_decay=1e-4)
 
+    if amp_dtype is not None:
+        print(f"  amp: {'bf16' if amp_dtype==torch.bfloat16 else 'fp16'}  loss: BCE+{args.dice_weight}*Dice  res: {args.cache_root}")
+
     best_iou = 0.0
     for ep in range(1, args.epochs + 1):
         model.train()
         tot = 0.0
         for inp, mask, _, _ in train_loader:
             inp, mask = inp.to(dev), mask.to(dev)
-            logit = model(inp)["out"]
-            loss = F.binary_cross_entropy_with_logits(logit, mask)
-            opt.zero_grad(); loss.backward(); opt.step()
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
+                logit = model(inp)["out"]
+                loss = dice_bce_loss(logit.float(), mask, dice_w=args.dice_weight)
+            loss.backward(); opt.step()
             tot += loss.item()
-        ious, _ = evaluate(model, val_hi_loader, dev, args.mask_thresh)
+        ious, _, _ = evaluate(model, val_hi_loader, dev, amp_dtype)
         miou = float(ious.mean())
         print(f"  ep{ep:02d} loss={tot/len(train_loader):.4f}  val_hi metal-IoU={miou:.4f}", flush=True)
         if miou > best_iou:
@@ -194,24 +217,35 @@ def main():
             torch.save({"model_state_dict": model.state_dict(), "epoch": ep,
                         "val_iou": miou, "args": vars(args)}, out / "best.pt")
 
-    # ── Validation (B): consistency = IoU(pred, actual metallic) by score bin ──
-    ious_all, scores_all = evaluate(model, val_all_loader, dev, args.mask_thresh)
+    # ── Validation (B): consistency IoU by score, on the has_metal subset ──
+    # (the bet: among metal-containing objects, does IoU rise monotonically with quality?)
+    ious_all, scores_all, cover_all = evaluate(model, val_all_loader, dev, amp_dtype)
+    hm = cover_all > args.has_metal_thresh
     by_bin = {}
     for s in range(6):
-        m = scores_all == s
+        m = (scores_all == s) & hm
         if m.any():
             by_bin[s] = {"n": int(m.sum()), "mean_iou": round(float(ious_all[m].mean()), 4)}
+    seq = [by_bin[s]["mean_iou"] for s in sorted(by_bin)]
+    srcc = float(spearmanr(ious_all[hm], scores_all[hm]).statistic) if hm.sum() > 1 else 0.0
+    monotonic = all(seq[i] <= seq[i + 1] for i in range(len(seq) - 1))
     report = {
         "best_val_hi_iou": round(best_iou, 4),
-        "consistency_iou_by_score": by_bin,
-        "interpretation": "If consistency is a quality signal, mean_iou should rise with score.",
+        "has_metal_thresh": args.has_metal_thresh,
+        "n_has_metal_val": int(hm.sum()),
+        "consistency_iou_by_score_HAS_METAL": by_bin,
+        "srcc_iou_vs_score": round(srcc, 4),
+        "monotonic_increasing": monotonic,
+        "verdict": "WIN: monotonic ↑ → 破局点2 holds (needs metal/non-metal gate)"
+                   if monotonic else "weak/non-monotonic — IoU not a clean quality ordinal",
     }
     (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    print("\n=== Validation (A) learnability: best val(hi) metal-IoU =", round(best_iou, 4))
-    print("=== Validation (B) consistency IoU by quality score (want monotonic ↑):")
+    print(f"\n=== (A) learnability: best val(hi) metal-IoU = {best_iou:.4f}")
+    print(f"=== (B) consistency IoU by score on has_metal>{args.has_metal_thresh} (n={int(hm.sum())}):")
     for s, v in by_bin.items():
-        print(f"    score {s}: n={v['n']:<5} mean IoU(pred, actual)={v['mean_iou']}")
-    print(f"\nreport -> {out/'report.json'}")
+        print(f"    score {s}: n={v['n']:<5} IoU={v['mean_iou']}")
+    print(f"    SRCC(IoU,score)={srcc:.3f}  monotonic={monotonic}  seq={seq}")
+    print(f"report -> {out/'report.json'}")
 
 
 if __name__ == "__main__":

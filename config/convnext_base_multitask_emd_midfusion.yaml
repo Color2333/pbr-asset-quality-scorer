@@ -1,0 +1,31 @@
+# 中层融合(mid-fusion)实验: 每通道走共享预训练stem+stage1(干净3ch,不OOD), 在stage1后用
+# 1x1 conv合并4通道特征图(可学习, 初始化为平均), 之后共享深层trunk联合编码。这是"早融合做对"
+# 的版本: 保留预训练兼容性 + 抓局部空间跨通道(metal-albedo处+黑metallic)。对照晚融合convnext
+# (metallic整体0.623/非黑0.686/近黑0.555)和朴素早融合(被OOD税废了, 近黑0.480)。
+# 关键: metallic近黑能否超过cc_metallic的0.570/天花板~0.58 = 局部空间是否带池化抓不到的信号。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+model:
+  backbone: convnext_mid
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_grad_scale: 1.0
+  emd_channels: all
+train:
+  epochs: 30
+  batch_size: 16
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights: {base_color: 1.0, normal_map: 1.0, roughness: 1.0, metallic: 1.5}
+unfreeze: {stage4_epoch: 5, stage34_epoch: 10, stage234_epoch: 15}
+output: {root: asset_quality_scorer/outputs/runs, exp_suffix: emd_midfusion}

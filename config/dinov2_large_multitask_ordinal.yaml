@@ -1,0 +1,43 @@
+# 步骤1 (序数学习): 与 nofilm baseline 完全一致, 唯一改动 = 全 4 通道换 CORAL 序数头。
+# 假设: 0-5 是序数标签而非连续值, CORAL(累积阈值二分类) 比 Huber 回归更合适,
+#       且对标签噪声更鲁棒(争议样本只污染一个阈值 bit, 不污染整个回归值)。
+# 严格单变量: backbone/数据/融合/采样全不动, 只换输出头 + 损失(Huber→CoralRankLoss)。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  ordinal_channels: all       # ← 唯一改动: 全 4 通道用 CORAL 序数头
+
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: ordinal_all

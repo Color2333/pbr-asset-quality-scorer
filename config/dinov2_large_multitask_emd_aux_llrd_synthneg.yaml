@@ -1,0 +1,60 @@
+# "合成漏标金属负样本" 决定性实验。
+# 背景: metallic test 卡 0.62, 训练侧(正则/schedule/架构)实证全不动它; 天花板
+#   proxy 又测不准上界。唯一能终结"0.62是不是天花板"的手段 = 注入干净信息看test动不动。
+# 做法: 拿确实有金属的资产(metallic非黑>20% + 原分>=3) → metallic图清零 → 标0,
+#   作为"漏标金属"干净负样本加进 train。教模型 "base_color显金属材质 + metallic图黑 = 差"。
+#   形成最小对照对(同物体: 真图=高分 vs 黑图=0分)。
+# 判读: metallic test 涨→信息可恢复,0.62非天花板且找到方法; 不动→确认到噪声顶可收尾。
+# 底座: LLRD+浅解冻(已证全解冻有害) + 整套正则栈(EMD+辅助监督+drop_path+强增广)。
+# 注意 render 循环性: render未重渲(图库只读), 其CLIP render半段仍显金属=可能捷径;
+#   干净上下文信号在 base_color(金属反照率不随metallic图变), test用真实样本评估可验证。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+  synth_neg:                  # ← 合成漏标负样本 (仅加进 train)
+    count: 4000               # 生成数量 (eligible 不足则取全部)
+    min_metallic_score: 3     # 源资产原 metallic 分 >= 3 (金属本来是好的)
+    min_nonblack_frac: 0.2    # 源资产 metallic 非黑像素 >= 20% (确实有金属)
+    neg_label: 0              # 清零后标 0 (漏标=最差)
+    seed: 0
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+  drop_path_rate: 0.2
+  aux_supervision: true
+
+train:
+  epochs: 30
+  batch_size: 8
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  llrd_decay: 0.65            # schedule 修复 (全解冻有害)
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  aux_loss_weight: 0.2
+  strong_aug: true
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 999          # 只浅解冻 stage4
+  stage234_epoch: 999
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_aux_llrd_synthneg

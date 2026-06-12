@@ -170,4 +170,16 @@ Config 文件必须能完整复现实验（包含 arch、dataset、sampler、los
 
 - **最多同时训练 1 个通道**（服务器 GPU 资源有限）
 - 训练前先 `nvidia-smi` 确认空闲 GPU
-- 后台训练用 `nohup ... > logs/{exp_id}.log 2>&1 &`，日志写到 `logs/`
+- 后台训练用 `nohup ... > logs/{exp_id}_{timestamp}.log 2>&1 &`，日志写到 `logs/`
+
+---
+
+## 9. 日志规范（强制）
+
+- **log 文件名必须带时间戳**：`logs/{exp_id}_{YYYYMMDD_HHMMSS}.log`（绝不复用同名 log 覆盖历史——曾因同名覆盖丢失了一次崩溃的根因）。
+- **log 必须承载关键内容**，不只是 stdout 堆砌。每个 run 的 log 开头/过程应记录：
+  - 启动时间、完整命令行、关键超参（config/items/lr/seed/GPU/DDP world）；
+  - 数据规模（train/val/test N、覆盖率）；
+  - 周期性 val 指标曲线（每 eval-every 一行）；
+  - 终点结论（best val、ckpt 路径）、异常/重启/OOM 必须留痕。
+- 目的：log 是事后复盘的唯一可靠记录，任何"为什么这次结果不同 / 何时崩的"都应能从 log 直接查到，不依赖记忆。

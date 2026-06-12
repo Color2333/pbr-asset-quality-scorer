@@ -1,0 +1,32 @@
+# DINOv3 当特征提取器跑连续打分器(多任务EMD): 唯一改动=backbone_name DINOv2→DINOv3(ViT-L patch16)。
+# 复用DINOv2MultiTaskScorer(Eva的forward_intermediates已适配)。诚实预期: metallic天花板不动,
+# 强通道(roughness/base/normal)可能蹭+0.00~0.02(DINOv3 dense特征在缺陷检测已证有用)。
+# 对照: DINOv2 emd_all (base0.842/normal0.807/rough0.896/metallic0.624/mean0.792)。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+model:
+  backbone_name: vit_large_patch16_dinov3   # ← DINOv3 ViT-L
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  llrd_decay: 0.65
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights: {base_color: 1.0, normal_map: 1.0, roughness: 1.0, metallic: 1.5}
+unfreeze: {stage4_epoch: 5, stage34_epoch: 999, stage234_epoch: 999}
+output: {root: asset_quality_scorer/outputs/runs, exp_suffix: emd}

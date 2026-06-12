@@ -1,0 +1,45 @@
+# 早融合实验: 4 张通道图堆成 12 通道, 从第一层(stem)就联合编码, 而非每通道独立编码。
+# 动机(用户洞察): 近黑 metallic 图独立编码会坍缩成相同特征, "晚融合太晚"。早融合让
+#   黑图被 base_color/normal/roughness 从第一层空间上下文化, 不再坍缩, 且能捕捉局部
+#   跨通道不一致(albedo像金属处 + metallic黑)。stem 3ch->12ch 用预训练权重平铺初始化。
+# 对照: ConvNeXt 晚融合版 convnext_base_multitask_emd (mean test 0.783, metallic 0.623,
+#   非黑0.686/近黑0.555)。重点看 metallic 尤其近黑子集能否动 = 早融合 vs 晚融合的关键。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  backbone: convnext_early
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_grad_scale: 1.0
+  emd_channels: all
+
+train:
+  epochs: 30
+  batch_size: 16
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_earlyfusion

@@ -1,0 +1,43 @@
+# ConvNeXt 主干跑当前最优架构(多任务 + EMD 头) —— 与 DINOv2 emd_all 做 backbone A/B。
+# 唯一改动 = backbone: dinov2 → convnext (ConvNeXt-Base 90M vs DINOv2 ViT-L 308M)。
+# 其余(多任务共享 + EMD 全通道分布头 + metallic grad_scale + 渐进解冻)与 emd_all 一致。
+# 对照 DINOv2 emd_all: base0.842 normal0.807 rough0.896 metallic0.624 mean0.792。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  backbone: convnext          # ← 唯一改动
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_grad_scale: 0.5
+  emd_channels: all           # 全 4 通道 EMD 分布头
+
+train:
+  epochs: 30
+  batch_size: 16              # ConvNeXt 更轻, 可比 DINOv2(12) 大
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd

@@ -1,0 +1,53 @@
+# "堆叠泛化" 实验 —— 针对 metallic train-test gap 0.16 (过拟合) 的全套对策。
+# 诊断: metallic train SRCC 0.788 / test 0.627, gap 是其他通道的 3-4 倍 → 问题
+# 是泛化失败(记住了噪声标签), 不是信息缺失(train 能学到 0.79)。
+# 所以堆的不是"拟合能力", 而是"泛化能力":
+#   1. EMD 全通道分布头        —— 已验证小赢 (acc +0.03~0.08, SRCC 不降)
+#   2. 辅助监督 (tier/pbrType/缺陷) —— 用现成标签正则共享 backbone, 逼它学
+#      "通用材质理解" 而非死记每样本的噪声分 → 直接缩 gap
+#   3. drop-path (stochastic depth 0.2) —— 随机丢残差分支, 防死记
+#   4. 强增广 (RandomErasing)   —— 轻量 cutout, 对 4 通道安全(无 color jitter)
+# 验证标准: 重跑 train-test gap, 看 metallic gap 是否从 0.16 收窄。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all           # 全 4 通道 NIMA/EMD 分布头
+  drop_path_rate: 0.2         # stochastic depth — 泛化正则
+  aux_supervision: true       # 辅助监督头 (tier/pbrType/4缺陷)
+
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  aux_loss_weight: 0.2        # 辅助监督权重 (正则, 不喧宾夺主)
+  strong_aug: true            # RandomErasing cutout
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_aux_dp

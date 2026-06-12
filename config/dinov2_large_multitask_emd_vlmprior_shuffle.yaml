@@ -1,0 +1,52 @@
+# EMD baseline + VLM 世界知识先验注入 (Phase 3 判决实验, 50k 数据)。
+# 唯一改动: Qwen2.5-VL "有无大面积金属" 的答案位 hidden state (3584d) 经
+#   LayerNorm→Linear(3584→128)→GELU→zero-init Linear(128→512) 残差加到
+#   metallic 的 fused 表征上 (其他通道严格不变)。零初始化门: 起点=无操作,
+#   梯度决定要不要用 — 与 me_spatialx 同款机制, 排除"改了架构本身"的混淆。
+# 判据: metallic test SRCC vs 0.627 基线; 近黑子集 vs 0.555-0.570 带。
+# 对照: _vlmprior_shuffle (先验跨资产打乱) — 增益若仍在则是伪增益。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+  vlm_prior:
+    path_prefix: asset_quality_scorer/dataset/vlm_prior_v4
+    dim: 3584
+    shuffle: true
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+  vlm_prior_dim: 3584
+  vlm_proj_dim: 128
+
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_vlmprior_shuffle

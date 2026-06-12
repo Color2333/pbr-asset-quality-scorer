@@ -1,0 +1,46 @@
+# EMD baseline(最佳模型) + 尾部过采样实验: 唯一改动=WeightedRandomSampler过采样稀有极端分。
+# 头: 预测 0-5 的 6-bin 概率分布; 损失: squared EMD (累积分布差)。
+# 动机(小实验验证): EMD 既保留序数性(SRCC 不输回归)又用分布建模拿到分类级 acc,
+#   且 EMD 天然"差一档轻罚、差多档重罚"——是"5→4 可接受"的原则性版本。
+#   小实验显示 acc 全面 +0.03~0.08, SRCC 不降。取分: 期望Σ(p·k)→SRCC, argmax→acc。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all           # ← 唯一改动: 全 4 通道用 NIMA/EMD 分布头
+
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  tail_sample_power: 0.5      # 逆频率^0.5, 跨4通道取max; 过采样normal=5/metallic=0等稀有极端分
+  tail_sample_cap: 10.0       # 单样本权重上限(防73个normal=5样本被过度复制而过拟合)
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_tailsamp

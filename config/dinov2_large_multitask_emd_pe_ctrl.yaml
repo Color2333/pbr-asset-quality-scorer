@@ -1,0 +1,49 @@
+# Packed-input retrain experiment: channel-specific multi-content inputs
+#   metallic  = [metallic, adaptive-brightened metallic, base luma]  (SOP grey + context)
+#   roughness = [roughness, base luma, render luma]                  (material context)
+#   normal/base = original RGB
+# Frozen backbone can't read these (false-color); so we UNFREEZE patch_embed from
+# ep0 + shallow stage4 + LLRD (stable; avoids the full-unfreeze crash on 39k noise).
+# Identical to emd_all otherwise -> clean test of "does retraining to read packed
+# inputs beat the standard inputs".
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+
+train:
+  epochs: 24
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  llrd_decay: 0.75            # stabilize the unfrozen layers
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  patch_embed: true          # ← unfreeze input conv from ep0 (read packed channels)
+  stage4_epoch: 3            # shallow: last 6 blocks adapt
+  stage34_epoch: 999         # never (avoid full-unfreeze crash on noisy 39k)
+  stage234_epoch: 999
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_pe_ctrl

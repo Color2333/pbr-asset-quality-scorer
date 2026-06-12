@@ -1,0 +1,51 @@
+# Multi-task v2 组合实验：在 nofilm baseline(srcc_mean 0.8025 / me 0.637) 之上叠 4 个改动
+#   1. physical-only      : 只训 pbrType=physical (SOP: 物理/风格化判断规则不同, 风格化标注宽松是噪声源)
+#   2. LLRD               : layer-wise LR decay, 治全解冻过拟合(nofilm 在 ep8 见顶后下滑)
+#   3. 去掉 FiLM          : FiLM 实验证实无效(且 _film 实际取的是 base_color 不是 render, 机制本身弱)
+#   4. CrossChannelBlock  : 4通道 fused 后做非对称 cross-attention
+#                           - 单向 mask: bc/nm/ro 读不到 metallic(防脏表示倒灌好通道)
+#                           - SOP 先验: me→bc, me→ro 偏置初始 +1.0, 可学习
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+  pbr_filter: physical        # ← 改动1
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false        # ← 改动3 (去FiLM)
+  metallic_grad_scale: 0.5
+  use_cross_channel: true     # ← 改动4
+  cc_n_heads: 4
+  cc_me_bc_bias: 1.0          # SOP: metallic→base_color 注意力先验
+  cc_me_ro_bias: 1.0          # SOP: metallic→roughness 注意力先验
+
+train:
+  epochs: 30
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  llrd_decay: 0.75            # ← 改动2 (LLRD)
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 10
+  stage234_epoch: 15
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: v2_phys_llrd_cc

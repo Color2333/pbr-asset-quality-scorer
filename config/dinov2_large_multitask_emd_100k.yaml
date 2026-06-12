@@ -1,0 +1,46 @@
+# 生产配方(EMD-all + 尾部过采样)在 100k 数据上的版本。唯一关键变化 = 数据规模 50k→100k。
+# 旧 49k 的 train/test 归属逐行保留(0 错位), 新增 55471 按 pbrType 分层 8:1:1 补入
+#   → 和 50k 版的对比是干净的"加数据"实验; test 子集包含全部旧 test, 可直接横向比。
+# epochs 30→20: 每 epoch 样本量 2.1×(39.3k→83.7k), 20ep 的总步数已超旧 30ep;
+#   解冻里程碑按比例移到 4/8/12, 保持解冻时机在训练进程中的相对位置不变。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224_0604
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color_0604.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all_0604.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+
+train:
+  epochs: 20
+  batch_size: 12
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  tail_sample_power: 0.5
+  tail_sample_cap: 10.0
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 4
+  stage34_epoch: 8
+  stage234_epoch: 12
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_100k

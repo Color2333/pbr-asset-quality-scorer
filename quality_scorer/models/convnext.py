@@ -352,9 +352,6 @@ class ConvNeXtRegressionScorer(nn.Module):
 
         if self.aux_fusion is not None:
             has_aux = aux_images is not None and aux_images.shape[1] > 0
-            # Extract aux stage4 maps. When aux_trainable, gradients flow through
-            # the shared backbone so it learns cross-channel consistency features;
-            # otherwise aux is a frozen reference (cheaper, original behaviour).
             aux_maps: list[torch.Tensor] = []
             if has_aux:
                 if self.aux_trainable:
@@ -364,18 +361,341 @@ class ConvNeXtRegressionScorer(nn.Module):
                     with torch.no_grad():
                         for i in range(aux_images.shape[1]):
                             aux_maps.append(self._extract_stage4_map(aux_images[:, i]))
-
             if spatial_aux:
-                # empty list → SpatialAuxFusion pools main map, preserving dim
-                parts.append(self.aux_fusion(s4_map, aux_maps))           # [B, aux_proj_dim]
+                parts.append(self.aux_fusion(s4_map, aux_maps))
             else:
-                aux_s4_feats = [self.aux_pool4(m) for m in aux_maps]      # [B, 1024] each
-                parts.append(self.aux_fusion(s4, aux_s4_feats))           # [B, aux_proj_dim]
+                aux_s4_feats = [self.aux_pool4(m) for m in aux_maps]
+                parts.append(self.aux_fusion(s4, aux_s4_feats))
 
-        fused = self.fusion(torch.cat(parts, dim=1))               # [B, hidden_dim]
-
-        score = torch.sigmoid(self.score_head(fused)).squeeze(1) * 5.0    # [B]
-        binary = self.binary_head(fused).squeeze(1)                        # [B]
+        fused = self.fusion(torch.cat(parts, dim=1))
+        score = torch.sigmoid(self.score_head(fused)).squeeze(1) * 5.0
+        binary = self.binary_head(fused).squeeze(1)
         defect = self.defect_head(fused) if self.defect_head is not None else None
-
         return score, binary, defect
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ConvNeXt multi-task scorer — same multitask/EMD design as DINOv2MultiTaskScorer
+# but with a shared ConvNeXt-Base backbone. Lets us A/B the backbone under the
+# project's current-best architecture (multitask + EMD head). Mirrors the DINOv2
+# version's forward / head logic so train_multitask.py and eval work unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConvNeXtMultiTaskScorer(nn.Module):
+    """ConvNeXt-Base backbone shared across 4 PBR channels (EMD / ordinal / reg heads)."""
+
+    CHANNELS = ("base_color", "normal_map", "roughness", "metallic")
+
+    def __init__(
+        self,
+        clip_dim: int = 1536,
+        attn_proj_dim: int = 256,
+        attn_heads: int = 4,
+        hidden_dim: int = 512,
+        dropout: float = 0.3,
+        freeze_features: bool = True,
+        use_clip_direct: bool = True,
+        metallic_grad_scale: float = 0.5,
+        ordinal_channels: list[str] | None = None,
+        emd_channels: list[str] | None = None,
+    ):
+        super().__init__()
+        self.metallic_grad_scale = metallic_grad_scale
+        if ordinal_channels == "all" or ordinal_channels == ["all"]:
+            ordinal_channels = list(self.CHANNELS)
+        self.ordinal_channels = set(ordinal_channels or [])
+        if emd_channels == "all" or emd_channels == ["all"]:
+            emd_channels = list(self.CHANNELS)
+        self.emd_channels = set(emd_channels or [])
+
+        bb = convnext_base(weights=ConvNeXt_Base_Weights.DEFAULT)
+        self.features = bb.features
+        self.pool2 = AttentionPool2d(_STAGE2_DIM)
+        self.pool3 = AttentionPool2d(_STAGE3_DIM)
+        self.pool4 = AttentionPool2d(_STAGE4_DIM)
+
+        self.cross_modal = CrossModalFusion(
+            stage_dims=(_STAGE2_DIM, _STAGE3_DIM, _STAGE4_DIM),
+            clip_half_dim=_CLIP_HALF_DIM, proj_dim=attn_proj_dim, num_heads=attn_heads,
+        )
+        self.clip_direct: nn.Module | None
+        if use_clip_direct:
+            self.clip_direct = nn.Sequential(
+                nn.LayerNorm(clip_dim), nn.Linear(clip_dim, attn_proj_dim), nn.GELU())
+            clip_direct_dim = attn_proj_dim
+        else:
+            self.clip_direct = None
+            clip_direct_dim = 0
+
+        fusion_in = _MULTISCALE_DIM + self.cross_modal.out_dim + clip_direct_dim
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(fusion_in), nn.Linear(fusion_in, hidden_dim),
+            nn.GELU(), nn.Dropout(dropout))
+
+        from quality_scorer.ordinal import MonotonicCoralHead
+        self.score_heads = nn.ModuleDict()
+        for ch in self.CHANNELS:
+            if ch in self.ordinal_channels:
+                self.score_heads[ch] = MonotonicCoralHead(hidden_dim, hidden_dim, num_classes=6)
+            elif ch in self.emd_channels:
+                self.score_heads[ch] = nn.Sequential(
+                    nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 6))
+            else:
+                self.score_heads[ch] = nn.Linear(hidden_dim, 1)
+        self.binary_heads = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+
+        # duck-type compatibility with DINOv2MultiTaskScorer (train_multitask.py
+        # prints / diagnostics reference these); ConvNeXt variant doesn't use them.
+        self.film_gen = None
+        self.cross_channel = None
+        self.aux_heads = None
+
+        if freeze_features:
+            for p in self.features.parameters():
+                p.requires_grad_(False)
+
+    # progressive unfreeze (ConvNeXt feature-block indices)
+    def unfreeze_stage4(self) -> None:
+        for i in (6, 7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage34(self) -> None:
+        for i in (4, 5, 6, 7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage234(self) -> None:
+        for i in (2, 3, 4, 5, 6, 7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+
+    def _encode(self, x: torch.Tensor):
+        for i in range(4): x = self.features[i](x)
+        s2 = self.pool2(x)
+        for i in range(4, 6): x = self.features[i](x)
+        s3 = self.pool3(x)
+        for i in range(6, 8): x = self.features[i](x)
+        s4 = self.pool4(x)
+        pooled = [s2, s3, s4]
+        return torch.cat(pooled, dim=1), pooled
+
+    def forward(self, channel_imgs: dict, clip_feat: torch.Tensor) -> dict:
+        from quality_scorer.ordinal import logits_to_class_probs, expected_quality_score
+        out: dict = {}
+        clip_f = clip_feat.float()
+        fused_per_ch: dict[str, torch.Tensor] = {}
+        for ch, img in channel_imgs.items():
+            img_feat, pooled = self._encode(img)
+            parts = [img_feat, self.cross_modal(pooled, clip_feat)]
+            if self.clip_direct is not None:
+                parts.append(self.clip_direct(clip_f))
+            fused = self.fusion(torch.cat(parts, dim=1))
+            if ch == "metallic" and self.metallic_grad_scale < 1.0 and self.training:
+                fused = fused * self.metallic_grad_scale + fused.detach() * (1.0 - self.metallic_grad_scale)
+            fused_per_ch[ch] = fused
+
+        for ch, fused in fused_per_ch.items():
+            binary = self.binary_heads[ch](fused).squeeze(1)
+            if ch in self.ordinal_channels:
+                ol = self.score_heads[ch](fused)
+                score = expected_quality_score(logits_to_class_probs(ol), max_score=5.0) * 5.0
+                out[ch] = (score, binary, ol)
+            elif ch in self.emd_channels:
+                dl = self.score_heads[ch](fused)
+                probs = torch.softmax(dl, dim=1)
+                kv = torch.arange(6, device=fused.device, dtype=probs.dtype)
+                out[ch] = ((probs * kv).sum(1), binary, dl)
+            else:
+                out[ch] = (torch.sigmoid(self.score_heads[ch](fused)).squeeze(1) * 5.0, binary, None)
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EARLY-FUSION scorer: stack all 4 channel maps into one 12-channel input and
+# encode JOINTLY from layer 1, instead of encoding each channel independently
+# (late fusion). Motivation: near-black metallic maps collapse to identical
+# features under independent encoding — by fusion time it's "too late". Early
+# fusion lets a black metallic map be spatially contextualized by base_color/
+# normal/roughness from the first conv, so it no longer collapses, and the model
+# can in principle detect LOCAL cross-channel inconsistency (metal-looking albedo
+# here + black metallic here). Minimal diff vs ConvNeXtMultiTaskScorer: input is
+# stacked-12ch + encoded once; all 4 heads read the SAME joint representation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConvNeXtEarlyFusionScorer(nn.Module):
+    CHANNELS = ("base_color", "normal_map", "roughness", "metallic")
+
+    def __init__(self, clip_dim: int = 1536, attn_proj_dim: int = 256, attn_heads: int = 4,
+                 hidden_dim: int = 512, dropout: float = 0.3, freeze_features: bool = True,
+                 use_clip_direct: bool = True, metallic_grad_scale: float = 1.0,
+                 emd_channels=None, ordinal_channels=None):
+        super().__init__()
+        self.metallic_grad_scale = metallic_grad_scale
+        if emd_channels == "all" or emd_channels == ["all"]: emd_channels = list(self.CHANNELS)
+        self.emd_channels = set(emd_channels or [])
+        if ordinal_channels == "all" or ordinal_channels == ["all"]: ordinal_channels = list(self.CHANNELS)
+        self.ordinal_channels = set(ordinal_channels or [])
+        self.film_gen = None; self.cross_channel = None; self.aux_heads = None  # duck-type
+
+        bb = convnext_base(weights=ConvNeXt_Base_Weights.DEFAULT)
+        # ── stem surgery: 3ch → 12ch (4 maps × RGB), inflate pretrained weights ──
+        old = bb.features[0][0]   # Conv2d(3,128,4,4)
+        new = nn.Conv2d(12, old.out_channels, kernel_size=old.kernel_size, stride=old.stride)
+        with torch.no_grad():
+            new.weight.copy_(old.weight.repeat(1, 4, 1, 1) / 4.0)   # tile over 4 maps, /4 keep scale
+            new.bias.copy_(old.bias)
+        bb.features[0][0] = new
+        self.features = bb.features
+        self.pool2 = AttentionPool2d(_STAGE2_DIM); self.pool3 = AttentionPool2d(_STAGE3_DIM); self.pool4 = AttentionPool2d(_STAGE4_DIM)
+        self.cross_modal = CrossModalFusion(stage_dims=(_STAGE2_DIM,_STAGE3_DIM,_STAGE4_DIM),
+                                            clip_half_dim=_CLIP_HALF_DIM, proj_dim=attn_proj_dim, num_heads=attn_heads)
+        if use_clip_direct:
+            self.clip_direct = nn.Sequential(nn.LayerNorm(clip_dim), nn.Linear(clip_dim, attn_proj_dim), nn.GELU()); cdd = attn_proj_dim
+        else:
+            self.clip_direct = None; cdd = 0
+        fin = _MULTISCALE_DIM + self.cross_modal.out_dim + cdd
+        self.fusion = nn.Sequential(nn.LayerNorm(fin), nn.Linear(fin, hidden_dim), nn.GELU(), nn.Dropout(dropout))
+        from quality_scorer.ordinal import MonotonicCoralHead
+        self.score_heads = nn.ModuleDict()
+        for ch in self.CHANNELS:
+            if ch in self.ordinal_channels: self.score_heads[ch] = MonotonicCoralHead(hidden_dim, hidden_dim, num_classes=6)
+            elif ch in self.emd_channels:   self.score_heads[ch] = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 6))
+            else:                           self.score_heads[ch] = nn.Linear(hidden_dim, 1)
+        self.binary_heads = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+        # stem (new conv) must stay trainable even when features frozen
+        if freeze_features:
+            for p in self.features.parameters(): p.requires_grad_(False)
+            for p in self.features[0][0].parameters(): p.requires_grad_(True)   # 12ch stem is new → train it
+
+    def unfreeze_stage4(self):
+        for i in (6,7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage34(self):
+        for i in (4,5,6,7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage234(self):
+        for i in (2,3,4,5,6,7):
+            for p in self.features[i].parameters(): p.requires_grad_(True)
+
+    def forward(self, channel_imgs: dict, clip_feat: torch.Tensor) -> dict:
+        from quality_scorer.ordinal import logits_to_class_probs, expected_quality_score
+        x = torch.cat([channel_imgs[c] for c in self.CHANNELS], dim=1)   # [B,12,H,W] JOINT
+        for i in range(4): x = self.features[i](x)
+        s2 = self.pool2(x)
+        for i in range(4,6): x = self.features[i](x)
+        s3 = self.pool3(x)
+        for i in range(6,8): x = self.features[i](x)
+        s4 = self.pool4(x)
+        pooled = [s2, s3, s4]; img_feat = torch.cat(pooled, dim=1)
+        parts = [img_feat, self.cross_modal(pooled, clip_feat)]
+        if self.clip_direct is not None: parts.append(self.clip_direct(clip_feat.float()))
+        fused = self.fusion(torch.cat(parts, dim=1))   # [B,hidden] JOINT, shared by all heads
+        out = {}
+        for ch in self.CHANNELS:
+            f = fused
+            if ch == "metallic" and self.metallic_grad_scale < 1.0 and self.training:
+                f = f * self.metallic_grad_scale + f.detach() * (1.0 - self.metallic_grad_scale)
+            binary = self.binary_heads[ch](f).squeeze(1)
+            if ch in self.ordinal_channels:
+                ol = self.score_heads[ch](f); out[ch] = (expected_quality_score(logits_to_class_probs(ol),5.0)*5.0, binary, ol)
+            elif ch in self.emd_channels:
+                dl = self.score_heads[ch](f); p = torch.softmax(dl,1); kv = torch.arange(6,device=f.device,dtype=p.dtype)
+                out[ch] = ((p*kv).sum(1), binary, dl)
+            else:
+                out[ch] = (torch.sigmoid(self.score_heads[ch](f)).squeeze(1)*5.0, binary, None)
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MID-FUSION scorer: each channel goes through the SHARED pretrained early layers
+# (stem+stage1) on its own clean 3-ch map (in-distribution, NO OOD-stem tax),
+# then the 4 feature maps are MERGED early (1×1 conv over concatenated stage1
+# maps) and the SHARED deep trunk (stages 2/3/4) runs jointly. This is "early
+# fusion done right": keeps pretrained-backbone compatibility AND captures LOCAL
+# spatial cross-channel correspondence (metal-looking albedo here + black metallic
+# here) that pooled cross-channel (cc_metallic) and the naive 12-ch stack miss.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConvNeXtMidFusionScorer(nn.Module):
+    CHANNELS = ("base_color", "normal_map", "roughness", "metallic")
+
+    def __init__(self, clip_dim: int = 1536, attn_proj_dim: int = 256, attn_heads: int = 4,
+                 hidden_dim: int = 512, dropout: float = 0.3, freeze_features: bool = True,
+                 use_clip_direct: bool = True, metallic_grad_scale: float = 1.0,
+                 emd_channels=None, ordinal_channels=None):
+        super().__init__()
+        self.metallic_grad_scale = metallic_grad_scale
+        if emd_channels == "all" or emd_channels == ["all"]: emd_channels = list(self.CHANNELS)
+        self.emd_channels = set(emd_channels or [])
+        if ordinal_channels == "all" or ordinal_channels == ["all"]: ordinal_channels = list(self.CHANNELS)
+        self.ordinal_channels = set(ordinal_channels or [])
+        self.film_gen = None; self.cross_channel = None; self.aux_heads = None
+
+        bb = convnext_base(weights=ConvNeXt_Base_Weights.DEFAULT)
+        feats = bb.features
+        self.early = nn.Sequential(feats[0], feats[1])    # stem + stage1 → 128-dim (shared, per-channel)
+        C1 = 128
+        # learnable spatial merge of 4 channels' stage1 maps; init = average (in-distribution)
+        self.merge = nn.Conv2d(C1 * 4, C1, kernel_size=1)
+        with torch.no_grad():
+            self.merge.weight.zero_()
+            for k in range(4):
+                for d in range(C1):
+                    self.merge.weight[d, k * C1 + d, 0, 0] = 0.25
+            self.merge.bias.zero_()
+        self.late = nn.ModuleList([feats[i] for i in range(2, 8)])   # downsample/stage2/3/4
+        self.pool2 = AttentionPool2d(_STAGE2_DIM); self.pool3 = AttentionPool2d(_STAGE3_DIM); self.pool4 = AttentionPool2d(_STAGE4_DIM)
+        self.cross_modal = CrossModalFusion(stage_dims=(_STAGE2_DIM,_STAGE3_DIM,_STAGE4_DIM),
+                                            clip_half_dim=_CLIP_HALF_DIM, proj_dim=attn_proj_dim, num_heads=attn_heads)
+        if use_clip_direct:
+            self.clip_direct = nn.Sequential(nn.LayerNorm(clip_dim), nn.Linear(clip_dim, attn_proj_dim), nn.GELU()); cdd = attn_proj_dim
+        else:
+            self.clip_direct = None; cdd = 0
+        fin = _MULTISCALE_DIM + self.cross_modal.out_dim + cdd
+        self.fusion = nn.Sequential(nn.LayerNorm(fin), nn.Linear(fin, hidden_dim), nn.GELU(), nn.Dropout(dropout))
+        from quality_scorer.ordinal import MonotonicCoralHead
+        self.score_heads = nn.ModuleDict()
+        for ch in self.CHANNELS:
+            if ch in self.ordinal_channels: self.score_heads[ch] = MonotonicCoralHead(hidden_dim, hidden_dim, num_classes=6)
+            elif ch in self.emd_channels:   self.score_heads[ch] = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 6))
+            else:                           self.score_heads[ch] = nn.Linear(hidden_dim, 1)
+        self.binary_heads = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+        if freeze_features:
+            for p in self.early.parameters(): p.requires_grad_(False)
+            for blk in self.late:
+                for p in blk.parameters(): p.requires_grad_(False)
+        # merge conv is new → always trainable
+
+    # progressive unfreeze maps onto the shared late trunk (indices into self.late: 0..5 = feats2..7)
+    def unfreeze_stage4(self):
+        for i in (4,5):
+            for p in self.late[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage34(self):
+        for i in (2,3,4,5):
+            for p in self.late[i].parameters(): p.requires_grad_(True)
+    def unfreeze_stage234(self):
+        for i in range(6):
+            for p in self.late[i].parameters(): p.requires_grad_(True)
+        for p in self.early.parameters(): p.requires_grad_(True)
+
+    def forward(self, channel_imgs: dict, clip_feat: torch.Tensor) -> dict:
+        from quality_scorer.ordinal import logits_to_class_probs, expected_quality_score
+        maps = [self.early(channel_imgs[c]) for c in self.CHANNELS]   # 4× [B,128,h,w] in-distribution
+        x = self.merge(torch.cat(maps, dim=1))                        # [B,128,h,w] joint, local cross-channel
+        x = self.late[0](x); x = self.late[1](x); s2 = self.pool2(x)  # stage2 → 256
+        x = self.late[2](x); x = self.late[3](x); s3 = self.pool3(x)  # stage3 → 512
+        x = self.late[4](x); x = self.late[5](x); s4 = self.pool4(x)  # stage4 → 1024
+        pooled = [s2, s3, s4]; img_feat = torch.cat(pooled, dim=1)
+        parts = [img_feat, self.cross_modal(pooled, clip_feat)]
+        if self.clip_direct is not None: parts.append(self.clip_direct(clip_feat.float()))
+        fused = self.fusion(torch.cat(parts, dim=1))
+        out = {}
+        for ch in self.CHANNELS:
+            f = fused
+            if ch == "metallic" and self.metallic_grad_scale < 1.0 and self.training:
+                f = f * self.metallic_grad_scale + f.detach() * (1.0 - self.metallic_grad_scale)
+            binary = self.binary_heads[ch](f).squeeze(1)
+            if ch in self.ordinal_channels:
+                ol = self.score_heads[ch](f); out[ch] = (expected_quality_score(logits_to_class_probs(ol),5.0)*5.0, binary, ol)
+            elif ch in self.emd_channels:
+                dl = self.score_heads[ch](f); p = torch.softmax(dl,1); kv = torch.arange(6,device=f.device,dtype=p.dtype)
+                out[ch] = ((p*kv).sum(1), binary, dl)
+            else:
+                out[ch] = (torch.sigmoid(self.score_heads[ch](f)).squeeze(1)*5.0, binary, None)
+        return out

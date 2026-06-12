@@ -35,6 +35,44 @@ _TAP_LAYERS    = (7, 15, 23)   # 0-indexed blocks → pseudo s2/s3/s4 (ViT-L has
 _MT_CHANNELS   = ("base_color", "normal_map", "roughness", "metallic")
 _CLIP_RENDER_DIM = 768  # first half of the 1536-d CLIP feat = render CLS
 
+class TokenAttentionPool(nn.Module):
+    """Learnable attention pooling over patch tokens [B,N,D] → [B,D].
+
+    Drop-in replacement for mean-pool. Mean-pool discards spatial structure —
+    it averages all patches equally, so localized defects (flipped-normal /
+    fake-AO / local artifacts) and rare high-quality detail get blurred into a
+    global statistic. A learnable per-token attention weight lets the model keep
+    "which patches matter", which is on-prior helpful for the normal/roughness
+    rare-tail (§5.1) where the signal is spatially local. Cheap (one LN+Linear)."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.score = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:  # [B,N,D]
+        w = torch.softmax(self.score(tokens), dim=1)          # [B,N,1]
+        return (w * tokens).sum(dim=1)                        # [B,D]
+
+
+class MetallicSpatialCrossAttn(nn.Module):
+    """metallic patch tokens (Q) cross-attend to the OTHER channels' patch tokens
+    (KV), spatially — so the metallic head can read LOCAL cross-channel context
+    ('metal-looking albedo HERE + black metallic HERE') that pooled cross-channel
+    (cc_metallic) and the global CLIP CLS miss. Strong channels stay independent;
+    only metallic reads the joint spatial info. Output is a pooled [B,D] feature
+    added (residual, zero-init out) to metallic's fused representation."""
+    def __init__(self, dim: int, n_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(dim, n_heads, dropout=dropout, batch_first=True)
+        self.norm_q = nn.LayerNorm(dim); self.norm_kv = nn.LayerNorm(dim)
+        self.out = nn.Linear(dim, dim)   # normal init; the residual gate (me_xproj) is the zero-init one
+
+    def forward(self, me_tokens: torch.Tensor, other_tokens: torch.Tensor) -> torch.Tensor:
+        q = self.norm_q(me_tokens); kv = self.norm_kv(other_tokens)
+        attended, _ = self.attn(q, kv, kv, need_weights=False)   # [B,N,D]
+        return self.out(attended.mean(dim=1))                    # [B,D] pooled cross feature
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cross-Channel Interaction Block
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,6 +344,14 @@ class DINOv2RegressionScorer(nn.Module):
     def unfreeze_stage234(self) -> None:
         self._unfreeze_blocks(0)    # all blocks
 
+    def unfreeze_patch_embed(self) -> None:
+        # the input conv that mixes the 3 channels — must adapt when inputs are
+        # packed with channel-specific multi-content (else frozen backbone reads
+        # them as a meaningless false-color RGB).
+        if hasattr(self.backbone, "patch_embed"):
+            for p in self.backbone.patch_embed.parameters():
+                p.requires_grad_(True)
+
     # ------------------------------------------------------------------
     def _multiscale_tokens(self, x: torch.Tensor) -> list[torch.Tensor]:
         """Return patch-token sequences [B, N, D] at the tapped depths."""
@@ -414,17 +460,53 @@ class DINOv2MultiTaskScorer(nn.Module):
         cc_n_heads: int = 4,
         cc_me_bc_bias: float = 1.0,         # SOP prior: metallic→base_color
         cc_me_ro_bias: float = 1.0,         # SOP prior: metallic→roughness
+        cc_metallic_only: bool = False,     # only metallic reads others; bc/nm/ro fused stay UNCHANGED
+        metallic_ordinal: bool = False,     # (legacy) CORAL ordinal head for metallic only
+        ordinal_channels: list[str] | None = None,  # which channels use CORAL ordinal head
+        emd_channels: list[str] | None = None,       # which channels use NIMA/EMD distribution head
+        drop_path_rate: float = 0.0,        # stochastic depth on backbone (regularizer)
+        aux_supervision: bool = False,      # auxiliary heads: tier / pbrType / defects
+        use_attn_pool: bool = False,        # attention-pool patch tokens instead of mean (spatial)
+        metallic_no_render: bool = False,   # mask render half of CLIP for metallic head (de-circular)
+        metallic_spatial_xchannel: bool = False,  # metallic reads OTHER channels' spatial tokens (others independent)
+        msx_heads: int = 8,
         backbone_name: str = _DINOV2_MODEL,
+        vlm_prior_dim: int = 0,             # VLM world-knowledge prior → metallic head. 0=off, 1=p_yes scalar, 3584=Qwen hidden
+        vlm_proj_dim: int = 128,            # low-rank projection for the hidden variant (39k noisy labels can't absorb 3584-d raw)
     ):
         super().__init__()
         self.metallic_grad_scale = metallic_grad_scale
+        # resolve which channels use the ordinal head
+        if ordinal_channels is None:
+            ordinal_channels = ["metallic"] if metallic_ordinal else []
+        elif ordinal_channels == "all" or ordinal_channels == ["all"]:
+            ordinal_channels = list(self.CHANNELS)
+        self.ordinal_channels = set(ordinal_channels)
+        self.metallic_ordinal = "metallic" in self.ordinal_channels  # back-compat
+        # resolve which channels use the EMD distribution head (NIMA-style)
+        if emd_channels == "all" or emd_channels == ["all"]:
+            emd_channels = list(self.CHANNELS)
+        self.emd_channels = set(emd_channels or [])
+        assert not (self.ordinal_channels & self.emd_channels), "a channel can't be both ordinal and EMD"
 
         # ── shared backbone ────────────────────────────────────────────────
+        # drop_path_rate (stochastic depth) randomly drops residual branches
+        # during training → forces redundant/general features, narrows the
+        # train-test gap. Targets metallic's 0.16 generalization gap directly.
         self.backbone = timm.create_model(
-            backbone_name, pretrained=True, num_classes=0, dynamic_img_size=True
+            backbone_name, pretrained=True, num_classes=0, dynamic_img_size=True,
+            drop_path_rate=drop_path_rate,
         )
         D = self.backbone.embed_dim      # 1024 for ViT-L
         n_scales = len(_TAP_LAYERS)
+
+        # spatial pooling: attention-pool (keeps localization) vs mean-pool
+        self.use_attn_pool = use_attn_pool
+        self.metallic_no_render = metallic_no_render
+        if use_attn_pool:
+            self.attn_pools = nn.ModuleList([TokenAttentionPool(D) for _ in _TAP_LAYERS])
+        else:
+            self.attn_pools = None
 
         # ── shared cross-modal fusion ──────────────────────────────────────
         self.cross_modal = CrossModalFusion(
@@ -471,6 +553,7 @@ class DINOv2MultiTaskScorer(nn.Module):
 
         # ── cross-channel interaction (optional) ──────────────────────────
         self.cross_channel: nn.Module | None
+        self.cc_metallic_only = cc_metallic_only
         if use_cross_channel:
             self.cross_channel = CrossChannelBlock(
                 dim=hidden_dim, n_heads=cc_n_heads,
@@ -480,9 +563,74 @@ class DINOv2MultiTaskScorer(nn.Module):
         else:
             self.cross_channel = None
 
-        # ── per-channel heads (score + binary, no defect in multi-task) ───
-        self.score_heads  = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+        # ── per-channel heads (score + binary) ────────────────────────────
+        # metallic optionally uses a CORAL ordinal head (5 cumulative logits)
+        # instead of sigmoid regression — more robust to its noisy labels.
+        # Other channels keep the simple regression head (no double-label issue).
+        from quality_scorer.ordinal import MonotonicCoralHead
+        self.score_heads = nn.ModuleDict()
+        for ch in self.CHANNELS:
+            if ch in self.ordinal_channels:
+                self.score_heads[ch] = MonotonicCoralHead(hidden_dim, hidden_dim, num_classes=6)
+            elif ch in self.emd_channels:
+                # NIMA-style: predict a 6-bin probability distribution over scores 0-5
+                self.score_heads[ch] = nn.Sequential(
+                    nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 6))
+            else:
+                self.score_heads[ch] = nn.Linear(hidden_dim, 1)
         self.binary_heads = nn.ModuleDict({ch: nn.Linear(hidden_dim, 1) for ch in self.CHANNELS})
+
+        # ── auxiliary supervision heads (regularize the shared backbone) ──
+        # Predict per-asset metadata from base_color's fused representation.
+        # These labels are FREE (already in the CSV) and never used before.
+        # Mechanism: extra supervised signal forces the shared backbone toward
+        # general "material understanding" rather than memorizing each sample's
+        # noisy quality score → narrows the train-test gap (esp. metallic).
+        #   tier     : Tier 1-5 quality grade   → 5-way classification
+        #   pbrType  : physical/stylized/uncert → 3-way classification
+        #   defect   : 4 binary defect flags    → 4-way independent BCE
+        self.aux_supervision = aux_supervision
+        if aux_supervision:
+            self.aux_heads = nn.ModuleDict({
+                "tier":    nn.Linear(hidden_dim, 5),
+                "pbrtype": nn.Linear(hidden_dim, 3),
+                "defect":  nn.Linear(hidden_dim, 4),
+            })
+        else:
+            self.aux_heads = None
+
+        # metallic-only spatial cross-channel: metallic reads OTHER channels'
+        # patch tokens (others stay independent). Operates on backbone dim D.
+        self.metallic_spatial_xchannel = metallic_spatial_xchannel
+        if metallic_spatial_xchannel:
+            self.me_xattn = MetallicSpatialCrossAttn(D, n_heads=msx_heads)
+            self.me_xproj = nn.Linear(D, hidden_dim)   # cross feature → hidden, added to metallic fused
+            nn.init.zeros_(self.me_xproj.weight); nn.init.zeros_(self.me_xproj.bias)
+        else:
+            self.me_xattn = None
+
+        # ── VLM world-knowledge prior injection (metallic only) ───────────
+        # Probe (2289 near-black test): Qwen2.5-VL "large metal parts?" beats
+        # the within-near-black visual ceiling (AUC 0.63 vs 0.58) — external
+        # info the channels can NEVER recover. Injected via the same zero-init
+        # residual gate pattern as me_xproj: starts as a no-op, gradient decides.
+        self.vlm_prior_dim = vlm_prior_dim
+        if vlm_prior_dim:
+            if vlm_prior_dim > 1:
+                self.vlm_proj = nn.Sequential(
+                    nn.LayerNorm(vlm_prior_dim),
+                    nn.Linear(vlm_prior_dim, vlm_proj_dim),
+                    nn.GELU(),
+                )
+                gate_in = vlm_proj_dim
+            else:
+                self.vlm_proj = nn.Identity()
+                gate_in = 1
+            self.vlm_gate = nn.Linear(gate_in, hidden_dim)
+            nn.init.zeros_(self.vlm_gate.weight); nn.init.zeros_(self.vlm_gate.bias)
+        else:
+            self.vlm_proj = None
+            self.vlm_gate = None
 
         if freeze_features:
             for p in self.backbone.parameters():
@@ -501,17 +649,35 @@ class DINOv2MultiTaskScorer(nn.Module):
     def unfreeze_stage34(self)  -> None: self._unfreeze_blocks(12)
     def unfreeze_stage234(self) -> None: self._unfreeze_blocks(0)
 
+    def unfreeze_patch_embed(self) -> None:
+        # input conv that mixes the 3 channels — must adapt for packed (channel-
+        # specific multi-content) inputs, else the frozen backbone reads them as
+        # a meaningless false-color RGB.
+        if hasattr(self.backbone, "patch_embed"):
+            for p in self.backbone.patch_embed.parameters():
+                p.requires_grad_(True)
+
     # ── helpers ────────────────────────────────────────────────────────────
     def _encode(self, img: torch.Tensor) -> torch.Tensor:
         """img [B,3,H,W] → fused representation [B, hidden_dim]."""
-        tokens = list(self.backbone.get_intermediate_layers(
-            img, n=_TAP_LAYERS, return_prefix_tokens=False, norm=True
-        ))
-        pooled = [t.mean(dim=1) for t in tokens]          # 3× [B, D]
+        if hasattr(self.backbone, "get_intermediate_layers"):   # DINOv2 (timm VisionTransformer)
+            tokens = list(self.backbone.get_intermediate_layers(
+                img, n=_TAP_LAYERS, return_prefix_tokens=False, norm=True
+            ))
+        else:                                                    # DINOv3 (timm Eva)
+            tokens = list(self.backbone.forward_intermediates(
+                img, indices=list(_TAP_LAYERS), return_prefix_tokens=False,
+                norm=True, output_fmt="NLC", intermediates_only=True
+            ))
+        if self.attn_pools is not None:
+            pooled = [self.attn_pools[i](t) for i, t in enumerate(tokens)]   # 3× [B, D]
+        else:
+            pooled = [t.mean(dim=1) for t in tokens]      # 3× [B, D]
         img_feat  = torch.cat(pooled, dim=1)              # [B, 3D]
         # NOTE: cross_modal and clip_direct need clip_feat — passed in forward.
         # _encode only extracts image features; fusion happens in forward.
-        return img_feat, pooled
+        # also return last-tap patch tokens (for metallic spatial cross-channel).
+        return img_feat, pooled, tokens[-1]
 
     def _film(self, fused: torch.Tensor, clip_feat: torch.Tensor) -> torch.Tensor:
         """FiLM: render CLS (first 768-d of clip_feat) → affine transform on fused."""
@@ -526,6 +692,8 @@ class DINOv2MultiTaskScorer(nn.Module):
         self,
         channel_imgs: dict[str, torch.Tensor],
         clip_feat: torch.Tensor,
+        vlm_prior: torch.Tensor | None = None,
+        vlm_regime_w: torch.Tensor | None = None,
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """
         Args:
@@ -533,6 +701,12 @@ class DINOv2MultiTaskScorer(nn.Module):
                           Pass only the channels you need (train: all 4,
                           eval single-channel: just that one).
             clip_feat:    [B, 1536]  render+base_color CLIP (shared for all channels)
+            vlm_prior:    [B] p_yes scalar or [B, 3584] Qwen hidden (vlm_prior_dim > 0)
+            vlm_regime_w: [B] soft near-black routing weight in [0,1]. Concentrates
+                          the prior's gradient on the near-black regime (where visual
+                          info is absent) instead of diluting it across all samples —
+                          the conditional logic the plain additive gate had to discover
+                          by itself. None = 1.0 (back-compat).
         Returns:
             dict channel_name → (score [B], binary_logit [B])
         """
@@ -541,12 +715,22 @@ class DINOv2MultiTaskScorer(nn.Module):
 
         # ── Step 1: encode each channel independently ─────────────────────
         fused_per_ch: dict[str, torch.Tensor] = {}
+        tokens_per_ch: dict[str, torch.Tensor] = {}
         for ch, img in channel_imgs.items():
-            img_feat, pooled = self._encode(img)
-            cross_feat = self.cross_modal(pooled, clip_feat)
+            img_feat, pooled, last_tokens = self._encode(img)
+            tokens_per_ch[ch] = last_tokens
+            # de-circular: metallic head must NOT see render (render is rendered
+            # FROM the possibly-wrong metallic map → circular for 'missing metal').
+            # Zero the render half [768:] of CLIP for metallic only. (§5.6)
+            clip_ch, clip_ch_f = clip_feat, clip_f
+            if ch == "metallic" and self.metallic_no_render:
+                clip_ch = clip_feat.clone()
+                clip_ch[:, _CLIP_RENDER_DIM:] = 0.0
+                clip_ch_f = clip_ch.float()
+            cross_feat = self.cross_modal(pooled, clip_ch)
             parts = [img_feat, cross_feat]
             if self.clip_direct is not None:
-                parts.append(self.clip_direct(clip_f))
+                parts.append(self.clip_direct(clip_ch_f))
 
             fused = self.fusion(torch.cat(parts, dim=1))  # [B, hidden]
 
@@ -558,14 +742,67 @@ class DINOv2MultiTaskScorer(nn.Module):
 
             fused_per_ch[ch] = fused
 
+        # ── Step 1b: metallic-only SPATIAL cross-channel ───────────────────
+        # metallic reads bc/nm/ro patch tokens (spatial); strong channels stay
+        # independent. Residual add (out_proj zero-init → starts as no-op).
+        if self.me_xattn is not None and "metallic" in tokens_per_ch and len(tokens_per_ch) > 1:
+            others = torch.cat([tokens_per_ch[c] for c in self.CHANNELS
+                                if c != "metallic" and c in tokens_per_ch], dim=1)
+            cross = self.me_xattn(tokens_per_ch["metallic"], others)   # [B, D]
+            fused_per_ch["metallic"] = fused_per_ch["metallic"] + self.me_xproj(cross)
+
+        # ── Step 1c: VLM world-knowledge prior → metallic (zero-init gate) ──
+        if self.vlm_gate is not None and vlm_prior is not None and "metallic" in fused_per_ch:
+            v = vlm_prior.float()
+            if v.dim() == 1:
+                v = v.unsqueeze(1)
+            delta = self.vlm_gate(self.vlm_proj(v))
+            if vlm_regime_w is not None:
+                delta = delta * vlm_regime_w.float().unsqueeze(1)   # near-black regime only
+            fused_per_ch["metallic"] = fused_per_ch["metallic"] + delta
+
         # ── Step 2: cross-channel interaction (all channels reason together) ─
+        # metallic reads bc/nm/ro (asymmetric hard mask blocks the reverse).
+        # cc_metallic_only: only metallic's fused is replaced by the refined
+        # version; bc/nm/ro keep their original fused (strictly unchanged) —
+        # matches "judge metallic FROM other channels, leave others alone".
         if self.cross_channel is not None and len(fused_per_ch) > 1:
-            fused_per_ch = self.cross_channel(fused_per_ch)
+            refined = self.cross_channel(fused_per_ch)
+            if self.cc_metallic_only:
+                fused_per_ch = {ch: (refined[ch] if ch == "metallic" else fused_per_ch[ch])
+                                for ch in fused_per_ch}
+            else:
+                fused_per_ch = refined
 
         # ── Step 3: per-channel score heads ───────────────────────────────
+        # Returns ch → (score[B], binary_logit[B], ord_logits[B,5] | None).
+        # For metallic-ordinal: `score` is the CORAL expected score (continuous,
+        # for SRCC eval), `ord_logits` are the 5 cumulative logits (for CoralRankLoss).
+        from quality_scorer.ordinal import logits_to_class_probs, expected_quality_score
+        # aux (3rd element) carries the extra logits for ordinal/EMD heads; the
+        # train loop picks the matching loss by checking ordinal_channels/emd_channels.
         for ch, fused in fused_per_ch.items():
-            score  = torch.sigmoid(self.score_heads[ch](fused)).squeeze(1) * 5.0
             binary = self.binary_heads[ch](fused).squeeze(1)
-            out[ch] = (score, binary)
+            if ch in self.ordinal_channels:
+                ord_logits = self.score_heads[ch](fused)              # [B, 5] cumulative
+                probs = logits_to_class_probs(ord_logits)             # [B, 6]
+                score = expected_quality_score(probs, max_score=5.0) * 5.0
+                out[ch] = (score, binary, ord_logits)
+            elif ch in self.emd_channels:
+                dist_logits = self.score_heads[ch](fused)             # [B, 6]
+                probs = torch.softmax(dist_logits, dim=1)             # [B, 6]
+                kvals = torch.arange(6, device=fused.device, dtype=probs.dtype)
+                score = (probs * kvals).sum(1)                        # expected score in [0,5]
+                out[ch] = (score, binary, dist_logits)
+            else:
+                score = torch.sigmoid(self.score_heads[ch](fused)).squeeze(1) * 5.0
+                out[ch] = (score, binary, None)
+
+        # ── auxiliary supervision (predicted from base_color's fused rep) ──
+        # Stored under the reserved "_aux" key; the train loop reads it for the
+        # aux loss. Eval/val loops iterate self.CHANNELS so they ignore it.
+        if self.aux_heads is not None and "base_color" in fused_per_ch:
+            bc = fused_per_ch["base_color"]
+            out["_aux"] = {k: head(bc) for k, head in self.aux_heads.items()}
 
         return out

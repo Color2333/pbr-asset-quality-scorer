@@ -1,0 +1,52 @@
+# "堆叠泛化 + schedule 修复" 实验。
+# 诊断: 全解冻有害 —— val SRCC 在 ep9(基本冻结)见顶 0.806, 全解冻+1e-4满LR重启后
+#   ep15 起断崖到 0.766。根因: 39k 噪声数据撑不起微调 304M ViT-L, 1e-4 对预训练
+#   backbone 太高(高~10倍), 冲垮 DINOv2 特征 + 过拟合矛盾标签。
+# 本配置 = emd_aux_dp 的整套正则栈 (EMD全通道 + 辅助监督 + drop_path) + schedule 修复:
+#   1. LLRD 0.65   —— backbone 深层 lr 指数衰减(几乎不动), 只顶层+头适配
+#   2. 只浅解冻 stage4 —— 取消 stage34/stage234 全解冻(设到 999 永不触发)
+# 目标: 保住/突破 0.806 峰值, 不再崩。与 emd_aux_dp(全解冻) 形成 schedule 对照。
+data:
+  tensor_cache_root: asset_quality_scorer/cache/224
+  clip_feature_path: asset_quality_scorer/features/clip_vitl14_openai_render_base_color.pt
+  csv_path: asset_quality_scorer/dataset/sampled_all.csv
+
+model:
+  clip_dim: 1536
+  attn_proj_dim: 256
+  attn_heads: 4
+  hidden_dim: 512
+  dropout: 0.3
+  invalid_max_score: 1
+  metallic_film: false
+  metallic_grad_scale: 0.5
+  emd_channels: all
+  drop_path_rate: 0.2
+  aux_supervision: true
+
+train:
+  epochs: 30
+  batch_size: 8              # GPU0 仅 ~14GB 空闲(root僵尸占10GB), 保守
+  num_workers: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  llrd_decay: 0.65           # ← schedule 修复核心: backbone 深层 lr 指数衰减
+  binary_loss_weight: 0.2
+  ranking_loss_weight: 0.05
+  huber_delta: 1.0
+  aux_loss_weight: 0.2
+  strong_aug: true
+  channel_weights:
+    base_color: 1.0
+    normal_map: 1.0
+    roughness:  1.0
+    metallic:   1.5
+
+unfreeze:
+  stage4_epoch: 5
+  stage34_epoch: 999         # ← 永不触发: 只浅解冻 stage4 的最后 6 个 block
+  stage234_epoch: 999
+
+output:
+  root: asset_quality_scorer/outputs/runs
+  exp_suffix: emd_aux_llrd
